@@ -6,7 +6,9 @@
 #define NABIA_IOPTIMIZER_H
 
 #include <memory>
+#include <optional>
 #include <utility>
+#include <Eigen/Dense>
 
 template<typename T> class IOptimizer {
 public:
@@ -18,7 +20,9 @@ public:
     IOptimizer(IOptimizer&&) noexcept = default;
     IOptimizer& operator=(IOptimizer&&) noexcept = default;
 
-    virtual void optimize() = 0;
+    /// Runs the optimizer and returns the solution. Without an initial guess,
+    /// the solver starts from its default (zero for the solvers in nabia).
+    virtual Eigen::VectorXd optimize(std::optional<Eigen::VectorXd> initial_guess) = 0;
 
 protected:
     std::unique_ptr<T> parameters;

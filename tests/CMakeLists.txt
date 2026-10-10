@@ -12,6 +12,8 @@ add_executable(nabia_tests
     test_descriptive.cpp
     test_smoothing.cpp
     test_exponential_smoothing.cpp
+    test_augmented_lagrangian.cpp
+    test_lbfgs.cpp
 )
 target_link_libraries(nabia_tests PRIVATE nabia::nabia Catch2::Catch2WithMain)
 nabia_set_warnings(nabia_tests)

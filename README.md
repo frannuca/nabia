@@ -31,6 +31,10 @@ ctest --preset debug            # run tests
 Other presets: `release` (optimised), `asan` (Address + UB sanitizers — use it
 whenever you touch memory-sensitive code).
 
+The build also compiles the LaTeX documentation when `pdflatex` is available
+(turn it off with `-DNABIA_BUILD_DOCS=OFF`):
+`build/debug/src/optimization/convex/docs/convex_optimization.pdf`.
+
 ## What's in it
 
 | Module | Functions |
@@ -38,6 +42,7 @@ whenever you touch memory-sensitive code).
 | `nabia::stats` | `mean`, `variance`, `stddev`, `autocorrelation` |
 | `nabia::signal` | `moving_average`, `exponential_moving_average`, `diff` |
 | `nabia::forecast` | `SimpleExponentialSmoothing` |
+| `optimization/convex` | `LBFGS`, `AugmentedLagrangian`, `LinearConstraint`, `BoxConstraints` |
 
 ## Adding a new feature (the workflow)
 

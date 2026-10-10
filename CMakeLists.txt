@@ -10,6 +10,7 @@ project(nabia
 # (not when someone pulls it in via add_subdirectory / FetchContent).
 option(NABIA_BUILD_TESTS    "Build unit tests"  ${PROJECT_IS_TOP_LEVEL})
 option(NABIA_BUILD_EXAMPLES "Build examples"    ${PROJECT_IS_TOP_LEVEL})
+option(NABIA_BUILD_DOCS     "Build PDF documentation (needs pdflatex)" ${PROJECT_IS_TOP_LEVEL})
 option(NABIA_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
@@ -41,8 +42,13 @@ add_library(nabia
     src/stats/descriptive.cpp
     src/signal/smoothing.cpp
     src/forecast/exponential_smoothing.cpp
+    src/optimization/convex/AugmentedLagrangian.cpp
         include/nabia/optimization/IOptimizer.h
-        include/nabia/optimization/IConvexOptimization.h
+        include/nabia/optimization/convex/Constraints.h
+        include/nabia/optimization/convex/IConvexOptimization.h
+        include/nabia/optimization/convex/AugmentedLagrangian.h
+        src/optimization/convex/LBFGS.cpp
+        include/nabia/optimization/convex/LBFGS.h
 )
 add_library(nabia::nabia ALIAS nabia)
 
@@ -66,4 +72,8 @@ endif()
 
 if(NABIA_BUILD_EXAMPLES)
     add_subdirectory(examples)
+endif()
+
+if(NABIA_BUILD_DOCS)
+    add_subdirectory(src/optimization/convex/docs)
 endif()
