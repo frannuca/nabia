@@ -1,0 +1,422 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage{nabiadoc}
+
+\title{Gaussian Process Forecasting\\[0.3em]\large Kernels, posterior prediction, marginal likelihood and the \texttt{nabia} implementation}
+\author{nabia documentation}
+\date{October 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This note documents \code{GaussianProcess} and the kernels in \code{Kernels.h}.
+We define Gaussian process regression on the time index and prove that the
+\code{nabia} kernels are valid covariance functions. The proofs cover the squared exponential kernel via
+its power series, the periodic kernel via a warping of time onto a circle, and sums and
+products via the Schur product theorem. We derive the gradient of every kernel with
+respect to its log-hyperparameters and the posterior predictive distribution.
+We also derive the log marginal likelihood and its gradient, using Jacobi's formula for
+the log-determinant. Further results: how normalizing the data changes the likelihood, the
+long-horizon behavior of forecasts (mean reversion for decaying kernels,
+exact periodicity for the periodic kernel), and the Cholesky-based algorithms
+with their costs. The last section maps everything to the code.
+\end{abstract}
+
+\tableofcontents
+
+%==============================================================================
+\section{Model}
+
+\begin{definition}
+A \emph{Gaussian process} $f\sim\mathcal{GP}(0,k)$ on $\R$ is a random
+function such that, for any finite set of times $t_1,\dots,t_m$, the vector
+$(f(t_1),\dots,f(t_m))$ is Gaussian with mean zero and covariance
+$K_{ij}=k(t_i,t_j)$. A function $k$ can serve as a covariance function iff it is
+symmetric and \emph{positive semi-definite}: every such Gram matrix $K$ is positive
+semi-definite.
+\end{definition}
+
+\code{nabia} places the observations of a series at $t=0,1,\dots,T-1$ and
+models
+\begin{equation}\label{eq:model}
+  y_t = m + s\,\big(f(t) + \varepsilon_t\big),\qquad f\sim\mathcal{GP}(0,k),\qquad
+  \varepsilon_t\overset{\text{iid}}{\sim}\N(0,\sigma_n^2),
+\end{equation}
+where $m$ is the sample mean and $s$ the sample standard deviation (or $s=1$
+without normalization, Section~\ref{sec:normalization}). We work with the
+standardized series $z_t=(y_t-m)/s$, so that $z = f + \varepsilon$ with
+$z\sim\N(0,K)$, $K = K_f + \sigma_n^2 I$, and $(K_f)_{ij}=k(t_i,t_j)$.
+
+The kernel encodes what the series looks like. Its variance sets the amplitude,
+its length scale sets how fast the function can change, and a period sets which
+patterns repeat. The data then choose these hyperparameters by maximizing the
+marginal likelihood (Section~\ref{sec:ml}).
+
+%==============================================================================
+\section{Kernels}
+
+All \code{nabia} kernels are stationary: they depend on $\tau=t-t'$ only.
+Their hyperparameters $\theta_j>0$ are exposed as $\log\theta_j$ (see
+Section~\ref{sec:optimization}), and \code{gradient()} returns
+$\partial k/\partial\log\theta_j=\theta_j\,\partial k/\partial\theta_j$.
+
+\subsection{Definitions and log-parameter gradients}
+
+\paragraph{Squared exponential} (\code{SquaredExponentialKernel}, hyperparameters $\sigma^2,\ell$):
+\[
+  k(\tau)=\sigma^2\exp\!\Big(-\frac{\tau^2}{2\ell^2}\Big),\qquad
+  \frac{\partial k}{\partial\log\sigma^2}=k,\qquad
+  \frac{\partial k}{\partial\log\ell}=k\,\frac{\tau^2}{\ell^2}.
+\]
+The second derivative follows from $\partial(\tau^2/2\ell^2)/\partial\ell=-\tau^2/\ell^3$,
+multiplied by $\ell$. Sample paths are infinitely differentiable.
+
+\paragraph{Matérn 5/2} (\code{Matern52Kernel}, $\sigma^2,\ell$): with $s=\sqrt5|\tau|/\ell$,
+\[
+  k=\sigma^2\Big(1+s+\frac{s^2}{3}\Big)e^{-s},\qquad
+  \frac{\partial k}{\partial\log\sigma^2}=k,\qquad
+  \frac{\partial k}{\partial\log\ell}=\sigma^2\,\frac{s^2(1+s)}{3}\,e^{-s}.
+\]
+\emph{Derivation.} $\frac{dk}{ds}=\sigma^2e^{-s}\big[(1+\tfrac{2s}{3})-(1+s+\tfrac{s^2}{3})\big]
+=-\sigma^2e^{-s}\,\tfrac{s(1+s)}{3}$, and $\frac{ds}{d\log\ell}=-s$; multiply.
+Sample paths are twice differentiable. This kernel is usually a more realistic model than the squared exponential
+for economic and financial series.
+
+\paragraph{Periodic} (\code{PeriodicKernel}, $\sigma^2,\ell,p$): with $u=\pi\tau/p$,
+\[
+  k=\sigma^2\exp\!\Big(-\frac{2\sin^2u}{\ell^2}\Big),\quad
+  \frac{\partial k}{\partial\log\sigma^2}=k,\quad
+  \frac{\partial k}{\partial\log\ell}=k\,\frac{4\sin^2u}{\ell^2},\quad
+  \frac{\partial k}{\partial\log p}=k\,\frac{2u\sin 2u}{\ell^2}.
+\]
+\emph{Derivation of the last one.} $\frac{du}{d\log p}=-u$ and
+$\frac{d\sin^2u}{du}=\sin2u$, so $\frac{d\sin^2u}{d\log p}=-u\sin2u$. Then
+multiply by $-2k/\ell^2$.
+
+\paragraph{Sum and product} (\code{SumKernel}, \code{ProductKernel}): for
+$k=k_1+k_2$ the gradient is the concatenation $(\nabla k_1,\nabla k_2)$. For
+$k=k_1k_2$ the product rule gives $(k_2\nabla k_1,\ k_1\nabla k_2)$.
+Hyperparameters are ordered as those of $k_1$ followed by those of $k_2$, recursively.
+
+\subsection{Validity}
+
+\begin{theorem}[Schur product theorem]\label{thm:schur}
+If $A,B\in\R^{m\times m}$ are positive semi-definite, so is their elementwise
+product $A\circ B$.
+\end{theorem}
+\begin{proof}
+Write $B=\sum_k\lambda_ku_ku_k^\T$ with $\lambda_k\ge0$. Then $(A\circ B)_{ij}=\sum_k\lambda_k(u_k)_iA_{ij}(u_k)_j$,
+so for any $x$,
+$x^\T(A\circ B)x=\sum_k\lambda_k\,(x\circ u_k)^\T A\,(x\circ u_k)\ge0$.
+\end{proof}
+
+\begin{corollary}\label{cor:closure}
+If $k_1,k_2$ are valid kernels, so are $k_1+k_2$, $k_1k_2$, $c\,k_1$ for $c>0$,
+$k_1(\phi(t),\phi(t'))$ for any map $\phi$, and pointwise limits of valid kernels.
+\end{corollary}
+\begin{proof}
+Gram matrices of $k_1+k_2$ are sums of positive semi-definite matrices. Those of $k_1k_2$ are Schur
+products (Theorem~\ref{thm:schur}). A warped kernel's Gram matrix on $t_1,\dots,t_m$ is $k_1$'s
+Gram matrix on $\phi(t_1),\dots,\phi(t_m)$. The positive semi-definite cone is closed, which covers limits.
+\end{proof}
+
+\begin{proposition}\label{prop:se-valid}
+The squared exponential kernel is positive semi-definite, on $\R$ and on $\R^d$ with
+$\norm{t-t'}$ in place of $|t-t'|$.
+\end{proposition}
+\begin{proof}
+On $\R$, write
+$e^{-(t-t')^2/2\ell^2} = g(t)\,g(t')\,e^{tt'/\ell^2}$ with $g(t)=e^{-t^2/2\ell^2}$. The
+power series $e^{tt'/\ell^2}=\sum_{n\ge0}(tt')^n/(\ell^{2n}n!)$ is a limit of sums of
+the rank-one kernels $t^nt'^n$, which are positive semi-definite. Multiplying by
+$g(t)g(t')$ (a diagonal congruence $DKD$) preserves positive semi-definiteness, and so does scaling by $\sigma^2>0$. On
+$\R^d$, $e^{-\norm{t-t'}^2/2\ell^2}=\prod_{i}e^{-(t_i-t_i')^2/2\ell^2}$ is a product of
+valid kernels (Corollary~\ref{cor:closure}).
+\end{proof}
+
+\begin{proposition}\label{prop:periodic-valid}
+The periodic kernel is the squared exponential kernel on $\R^2$, with the same $\ell$, applied
+to the warping $\phi(t)=(\cos(2\pi t/p),\sin(2\pi t/p))$. It is therefore positive semi-definite.
+\end{proposition}
+\begin{proof}
+$\norm{\phi(t)-\phi(t')}^2 = 2-2\cos(2\pi(t-t')/p) = 4\sin^2(\pi(t-t')/p)$, so
+$\exp(-\norm{\phi(t)-\phi(t')}^2/2\ell^2)=\exp(-2\sin^2(\pi\tau/p)/\ell^2)$. Conclude with
+Proposition~\ref{prop:se-valid} and Corollary~\ref{cor:closure}.
+\end{proof}
+
+The Matérn 5/2 kernel is positive semi-definite by Bochner's theorem. Its spectral
+density is proportional to $(5/\ell^2+\omega^2)^{-3}$, which is non-negative and
+integrable~\cite{rasmussen2006}. With $\sigma_n^2>0$, $K=K_f+\sigma_n^2I$ is positive
+\emph{definite} for every kernel above. Its Cholesky factor therefore exists in exact
+arithmetic. The floor \code{min\_noise\_variance} keeps it computable in floating
+point.
+
+%==============================================================================
+\section{Posterior prediction}
+
+\begin{theorem}[Predictive distribution]\label{thm:predictive}
+Let $t_*$ be a vector of $m$ new times, $K_* = k(t,t_*)\in\R^{T\times m}$ and
+$K_{**}=k(t_*,t_*)$. Under \eqref{eq:model}, with $K=K_f+\sigma_n^2I$,
+\[
+  f(t_*)\mid z\sim\N\big(K_*^\T K^{-1}z,\ K_{**}-K_*^\T K^{-1}K_*\big),\qquad
+  z_*\mid z\sim\N\big(K_*^\T K^{-1}z,\ K_{**}-K_*^\T K^{-1}K_*+\sigma_n^2I\big).
+\]
+\end{theorem}
+\begin{proof}
+$(z,f(t_*))$ is jointly Gaussian with zero mean, $\Cov(z)=K$, $\Cov(f(t_*))=K_{**}$
+and $\Cov(z,f(t_*))=\Cov(f(t),f(t_*))=K_*$, because the noise is independent of $f$. The first claim is the
+conditioning lemma (proved in the Kalman filter note, Lemma~2.1). A new observation
+$z_*=f(t_*)+\varepsilon_*$ adds independent noise, which adds $\sigma_n^2I$ to the covariance.
+\end{proof}
+
+The predictive mean $K_*^\T\alpha$, with $\alpha=K^{-1}z$, is a weighted sum of kernel
+functions centred at the data. The variance is the prior variance minus what the
+data explain. \code{GaussianProcess::predict} returns, for each $t_*$, the
+marginal mean and variance of $y_*=m+s\,z_*$ (noise included), and
+\code{forecast(H)} calls it with $t_*=T,\dots,T+H-1$.
+
+\subsection{Long-horizon behavior}
+
+\begin{proposition}[Mean reversion]\label{prop:reversion}
+If $k(\tau)\to0$ as $|\tau|\to\infty$ (squared exponential, Matérn), then as
+$t_*\to\infty$ the predictive mean of $y_*$ tends to $m$ and its variance to
+$s^2(k(0)+\sigma_n^2)$.
+\end{proposition}
+\begin{proof}
+Each entry of $K_*$ is $k(t_i-t_*)\to0$, while $K^{-1}$ and $z$ are fixed. So the mean
+$K_*^\T K^{-1}z\to0$ and the variance $k(0)-K_*^\T K^{-1}K_*+\sigma_n^2\to k(0)+\sigma_n^2$.
+Transform back with $y_*=m+sz_*$.
+\end{proof}
+
+\begin{proposition}[Periodic extrapolation]\label{prop:periodic}
+For the periodic kernel with period $p$, the predictive mean and variance at
+$t_*+p$ equal those at $t_*$.
+\end{proposition}
+\begin{proof}
+$k(t_i,t_*+p)=k(t_i,t_*)$ and $k(t_*+p,t_*+p)=k(t_*,t_*)$, since $\sin^2$ has period $\pi$. Hence $K_*$ and
+$K_{**}$ are unchanged, and so is everything in Theorem~\ref{thm:predictive}.
+\end{proof}
+
+So a decaying kernel is a local model. Its forecasts fade towards the mean
+on the time scale of the length scale, and its intervals widen to the
+unconditional spread. Long-range structure must be built into the kernel: a
+periodic component (or a sum with one) repeats seasonality indefinitely, and a
+product of periodic and decaying kernels lets the pattern drift.
+
+%==============================================================================
+\section{Marginal likelihood}\label{sec:ml}
+
+Integrating out $f$, $z\sim\N(0,K(\theta))$, so the log marginal likelihood is
+\begin{equation}\label{eq:lml}
+  \log p(z\mid\theta) = -\tfrac12\, z^\T K^{-1}z \;-\; \tfrac12\log\det K \;-\; \tfrac T2\log2\pi .
+\end{equation}
+The first term rewards fitting the data. The second penalizes complexity: a
+flexible kernel (short length scales, small noise) can explain many different
+data sets, so it spreads its probability mass thinly and pays through a larger
+$\log\det K$. The trade-off is automatic, an Occam's razor that needs no
+validation set.
+
+\begin{lemma}\label{lem:matrix-calculus}
+For a smooth family of invertible symmetric matrices $K(\theta)$, with $K'=\partial K/\partial\theta$:
+(i) $\partial K^{-1}/\partial\theta = -K^{-1}K'K^{-1}$;
+(ii) $\partial\log\det K/\partial\theta = \tr(K^{-1}K')$ when $K\succ0$.
+\end{lemma}
+\begin{proof}
+(i) Differentiate $KK^{-1}=I$: $K'K^{-1}+K\,\partial K^{-1}=0$.
+(ii) $\det(K+\epsilon K')=\det K\,\det(I+\epsilon K^{-1}K')$, and
+$\det(I+\epsilon A)=\prod_i(1+\epsilon\lambda_i(A))=1+\epsilon\tr A+O(\epsilon^2)$.
+Hence $\log\det(K+\epsilon K')=\log\det K+\epsilon\tr(K^{-1}K')+O(\epsilon^2)$.
+\end{proof}
+
+\begin{theorem}[Gradient of the log marginal likelihood]\label{thm:gradient}
+With $\alpha=K^{-1}z$,
+\[
+  \frac{\partial\log p(z\mid\theta)}{\partial\theta_j}
+  = \tfrac12\,\alpha^\T\frac{\partial K}{\partial\theta_j}\alpha - \tfrac12\tr\!\Big(K^{-1}\frac{\partial K}{\partial\theta_j}\Big)
+  = \tfrac12\tr\!\Big((\alpha\alpha^\T-K^{-1})\,\frac{\partial K}{\partial\theta_j}\Big).
+\]
+\end{theorem}
+\begin{proof}
+Differentiate \eqref{eq:lml} with Lemma~\ref{lem:matrix-calculus}:
+$\partial(z^\T K^{-1}z)=-z^\T K^{-1}K'K^{-1}z=-\alpha^\T K'\alpha$ and
+$\partial\log\det K=\tr(K^{-1}K')$. Finally, $\alpha^\T K'\alpha=\tr(\alpha\alpha^\T K')$.
+\end{proof}
+
+For a kernel hyperparameter, $\partial K/\partial\log\theta_j$ is the matrix of
+\code{gradient()} entries. For the noise, $\partial K/\partial\log\sigma_n^2=\sigma_n^2I$, so
+$\partial\log p/\partial\log\sigma_n^2=\tfrac12\sigma_n^2\tr(\alpha\alpha^\T-K^{-1})$.
+
+\subsection{Normalization}\label{sec:normalization}
+
+\begin{proposition}\label{prop:normalization}
+If $z=(y-m\mathbf1)/s$ with fixed $m,s$, then $\log p(y)=\log p(z)-T\log s$.
+\end{proposition}
+\begin{proof}
+The map $y\mapsto z$ is affine with Jacobian $s^{-T}$, so
+$p_y(y)=p_z(z)\,s^{-T}$.
+\end{proof}
+
+\code{nabia} fits on $z$ when \code{normalize} is true (the default), so that
+unit variances and noise levels around $10^{-2}$ are sensible starting points
+whatever the units of $y$. The constant $-T\log s$ does not depend on $\theta$,
+so the optimum is unchanged. \code{log\_marginal\_likelihood()} reports $\log p(y)$
+in the units of $y$, using Proposition~\ref{prop:normalization}. Fitted kernel
+variances and the noise variance are in normalized units: multiply by $s^2$ for
+the units of $y$. The mean $m$ is the sample mean, plugged in rather than estimated
+jointly. This is standard and harmless when the series has no strong trend.
+
+%==============================================================================
+\section{Computation}
+
+\paragraph{Cholesky factorization.} Write $K=LL^\T$ with $L$ lower triangular (cost $T^3/3$). Then:
+\begin{itemize}
+  \item $\alpha=L^{-\T}(L^{-1}z)$, two triangular solves costing $O(T^2)$;
+  \item $\log\det K=2\sum_i\log L_{ii}$, since $\det K=\det(L)^2=\prod_iL_{ii}^2$;
+  \item for predictions, $v=L^{-1}K_*$ gives $K_*^\T K^{-1}K_*=v^\T v$, so the
+        predictive variances are $\diag(K_{**})-\sum_i v_{i\cdot}^2$. This costs $O(T^2)$ per
+        new time and never forms $K^{-1}$.
+\end{itemize}
+Subtracting $v^\T v$ can produce tiny negative values in floating point;
+\code{predict} clamps the latent variance at $0$ before adding the noise.
+
+\paragraph{Gradient.} Theorem~\ref{thm:gradient} needs $W=\alpha\alpha^\T-K^{-1}$.
+\code{nabia} forms $K^{-1}$ from the Cholesky factor ($O(T^3)$) and accumulates
+$-\tfrac12\sum_{ij}W_{ij}\,\partial k(t_i,t_j)/\partial\log\theta$ for all
+hyperparameters in one pass over the $T^2$ pairs. One evaluation of the objective
+and its gradient therefore costs $O(T^3+T^2n_\theta)$.
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Operation & Cost & Memory \\
+\midrule
+Gram matrix & $O(T^2)$ kernel evaluations & $O(T^2)$ \\
+Cholesky, $\alpha$, $\log\det$ & $O(T^3)$ & $O(T^2)$ \\
+Likelihood gradient & $O(T^3+T^2n_\theta)$ & $O(T^2)$ \\
+Prediction at $m$ times & $O(T^2m)$ & $O(Tm)$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+In practice this means a few thousand observations at most. Beyond that,
+state-space representations of Matérn kernels (which reduce to Kalman filtering) or sparse
+approximations are needed.
+
+%==============================================================================
+\section{Hyperparameter optimization}\label{sec:optimization}
+
+The hyperparameters are
+$\theta=(\log\theta_1,\dots,\log\theta_{n_k},\log\sigma_n^2)$, without the last entry when
+\code{optimize\_noise} is false. \code{fit} minimizes $-\log p(z\mid\theta)$ with
+\code{LBFGS} (tolerance $10^{-5}$ on the gradient, at most \code{max\_iter}
+iterations), starting from the kernel and noise given in the parameters.
+\begin{itemize}
+  \item \emph{Why log-parameters.} Positivity becomes unconstrained, and the
+        objective is much better conditioned. Length scales and variances matter on a
+        relative scale, so a unit step in $\log\ell$ means the same thing for $\ell=0.1$ and $\ell=100$.
+  \item \emph{Safeguards.} A trial with $|\theta_j|>20$ (a factor $e^{20}\approx5\cdot10^8$), or
+        whose $K$ fails the Cholesky factorization, returns $+\infty$. The L-BFGS line search
+        rejects such steps and backtracks.
+  \item \emph{Noise floor.} The noise is clamped at \code{min\_noise\_variance}. In
+        the clamped region the true gradient in $\log\sigma_n^2$ is zero, but the formula
+        above is not. This only matters if the optimum lies at the floor, which
+        signals noiseless data.
+  \item \emph{Local optima.} The marginal likelihood is not concave and can be
+        multimodal: for example, a short-length-scale explanation that fits the noise against a long-length-scale one with
+        more noise, or periods that are multiples of each other. Start from plausible values,
+        such as a period near the known seasonality. The \code{nabia} tests start a periodic kernel at
+        $p=11.5$ and recover $p=12.0$. Restarting from several initial points is a cheap
+        safeguard.
+  \item The parameter struct keeps the initial kernel. The fitted copy is
+        available through \code{kernel()}, and \code{noise\_variance()} returns the fitted noise.
+\end{itemize}
+
+%==============================================================================
+\section{Implementation}
+
+\subsection{Interface}
+\begin{lstlisting}
+auto p = std::make_unique<GaussianProcessParams>();
+p->kernel = std::make_unique<SumKernel>(
+    std::make_unique<Matern52Kernel>(1.0, 20.0),           // slow trend
+    std::make_unique<PeriodicKernel>(0.5, 1.0, 12.0));     // seasonality
+p->noise_variance = 1e-2;                                   // initial value
+GaussianProcess gp(std::move(p));
+gp.fit(y);                                // equally spaced, finite values
+Forecast fc = gp.forecast(24);            // t = T .. T+23, noise included
+Forecast at = gp.predict(times);          // any times, e.g. between observations
+double lml = gp.log_marginal_likelihood();
+\end{lstlisting}
+
+\subsection{Algorithm}
+\begin{algorithm}[ht]
+\caption{\code{GaussianProcess::fit} and \code{predict}}\label{alg:gp}
+\begin{algorithmic}[1]
+\Require $y_0,\dots,y_{T-1}$ finite, $T\ge2$; kernel $k$; noise $\sigma_n^2$
+\State $t\gets(0,\dots,T-1)$;\; $m\gets\bar y$;\; $s\gets$ sample sd (or 1);\; $z\gets(y-m)/s$
+\If{\code{optimize\_hyperparameters}}
+  \State $\theta^\star\gets$ L-BFGS minimizer of $-\log p(z\mid\theta)$, using Theorem~\ref{thm:gradient} for the gradient
+  \State set $k$ and $\sigma_n^2$ from $\theta^\star$
+\EndIf
+\State $L\gets\mathrm{chol}(K_f+\sigma_n^2I)$;\; $\alpha\gets L^{-\T}L^{-1}z$ \Comment{stored for prediction}
+\Statex \textbf{predict}$(t_*)$:
+\State $K_*\gets k(t,t_*)$;\; $V\gets L^{-1}K_*$
+\State $\mu\gets m+s\,K_*^\T\alpha$;\; $v\gets s^2\big(\max(\diag K_{**}-\mathrm{colsum}(V\circ V),0)+\sigma_n^2\big)$
+\end{algorithmic}
+\end{algorithm}
+
+\paragraph{Validation.} The constructor requires a kernel and positive noise
+variances. \code{fit} requires at least two finite observations, so the GP does not
+accept missing values; use the Kalman filter for gappy series. Kernels
+reject non-positive hyperparameters. A final Cholesky failure, which only happens if the
+noise is too small for the kernel, throws \code{std::invalid\_argument}.
+
+\paragraph{Correspondence with the code.}
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+Mathematics & \code{GaussianProcess} / kernels \\
+\midrule
+$k(t,t')$, $\partial k/\partial\log\theta$ & \code{IKernel::operator()}, \code{gradient()} \\
+$\log\theta$ & \code{log\_hyperparameters()}, \code{set\_log\_hyperparameters()} \\
+$K_f$ & \code{IKernel::matrix(t, t)} \\
+$m,\ s$ & private \code{offset\_}, \code{scale\_} \\
+$L,\ \alpha$ & private \code{chol\_}, \code{alpha\_} \\
+$\log p(y)$ & \code{log\_marginal\_likelihood()} \\
+$m+sK_f\alpha$ & \code{fitted\_values()} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Tests.} \code{tests/test\_forecasters.cpp} checks:
+\begin{itemize}
+  \item every kernel's gradient against central finite differences, plus symmetry;
+  \item interpolation of a smooth function, with error below $10^{-3}$ between the data points;
+  \item that hyperparameter fitting raises the log marginal likelihood by more than 10 nats
+        and finds a plausible length scale;
+  \item Proposition~\ref{prop:periodic}: a periodic kernel recovers period $12.0$,
+        extrapolates 24 steps to within $0.1$, and the true values fall inside the 95\% intervals;
+  \item Proposition~\ref{prop:reversion}: at $t_*=1000$ the forecast equals $m$
+        and its variance equals $s^2(k(0)+\sigma_n^2)$, both to $10^{-12}$;
+  \item rejection of invalid input.
+\end{itemize}
+
+\subsection{Limitations}
+Cost is cubic in $T$. Inputs are equally spaced time indices, although \code{predict} accepts
+any times. The mean is constant, the noise Gaussian and homoscedastic, and the
+kernels stationary. There are no automatic restarts in the hyperparameter
+search.
+
+%==============================================================================
+\begin{thebibliography}{9}
+\bibitem{rasmussen2006} C.~E. Rasmussen and C.~K.~I. Williams, \emph{Gaussian Processes for Machine Learning},
+  MIT Press, 2006.
+\bibitem{roberts2013} S. Roberts, M. Osborne, M. Ebden, S. Reece, N. Gibson and S. Aigrain,
+  Gaussian processes for time-series modelling, \emph{Phil. Trans. R. Soc. A} 371 (2013) 20110550.
+\bibitem{mackay1998} D.~J.~C. MacKay, Introduction to Gaussian processes, in C.~M. Bishop (ed.),
+  \emph{Neural Networks and Machine Learning}, Springer, 1998, 133--165.
+\bibitem{horn2013} R.~A. Horn and C.~R. Johnson, \emph{Matrix Analysis}, 2nd ed., Cambridge University Press, 2013.
+\bibitem{hartikainen2010} J. Hartikainen and S. S\"arkk\"a, Kalman filtering and smoothing solutions to temporal
+  Gaussian process regression models, \emph{IEEE MLSP} (2010) 379--384.
+\end{thebibliography}
+
+\end{document}

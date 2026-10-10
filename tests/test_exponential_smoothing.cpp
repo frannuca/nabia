@@ -2,13 +2,11 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
-#include <catch2/matchers/catch_matchers_vector.hpp>
 
 #include <stdexcept>
-#include <vector>
 
-using Catch::Matchers::Approx;
 using Catch::Matchers::WithinAbs;
+using Eigen::VectorXd;
 using nabia::forecast::SimpleExponentialSmoothing;
 
 TEST_CASE("SES rejects invalid alpha", "[forecast]") {
@@ -24,18 +22,22 @@ TEST_CASE("SES forecast before fit throws", "[forecast]") {
 
 TEST_CASE("SES fit and forecast", "[forecast]") {
     SimpleExponentialSmoothing model(0.5);
-    const std::vector<double> y{10.0, 20.0, 30.0};
-    model.fit(y);
+    model.fit(VectorXd{{10.0, 20.0, 30.0}});
 
     // levels: 10 -> 15 -> 22.5 ; fitted = level before each observation
-    CHECK_THAT(model.fitted(), Approx(std::vector<double>{10.0, 10.0, 15.0}));
+    CHECK(model.fitted_values() == VectorXd{{10.0, 10.0, 15.0}});
     CHECK_THAT(model.sse(), WithinAbs(0.0 + 100.0 + 225.0, 1e-12));
-    CHECK_THAT(model.forecast(2), Approx(std::vector<double>{22.5, 22.5}));
+    const Forecast fc = model.forecast(2);
+    CHECK(fc.mean == VectorXd{{22.5, 22.5}});
+    // ETS(A,N,N) variance: sigma^2 (1 + (h-1) alpha^2), sigma^2 = SSE / T = 325 / 3
+    CHECK_THAT(fc.variance(0), WithinAbs(325.0 / 3.0, 1e-12));
+    CHECK_THAT(fc.variance(1), WithinAbs(325.0 / 3.0 * 1.25, 1e-12));
+    CHECK((fc.lower(0.95).array() < fc.mean.array()).all());
+    CHECK((fc.upper(0.95).array() > fc.mean.array()).all());
 }
 
 TEST_CASE("SES with alpha = 1 is a naive forecast", "[forecast]") {
     SimpleExponentialSmoothing model(1.0);
-    const std::vector<double> y{3.0, 7.0, 4.0};
-    model.fit(y);
-    CHECK_THAT(model.forecast(1), Approx(std::vector<double>{4.0}));
+    model.fit(VectorXd{{3.0, 7.0, 4.0}});
+    CHECK(model.forecast(1).mean == VectorXd{{4.0}});
 }

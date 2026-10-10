@@ -17,6 +17,7 @@ add_executable(nabia_tests
     test_sqp.cpp
     test_nongradopt.cpp
     test_filters.cpp
+    test_forecasters.cpp
     test_risk_measures.cpp
     test_risk_budgeting.cpp
 )

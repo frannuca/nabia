@@ -1,0 +1,300 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage{nabiadoc}
+
+\title{Simple Exponential Smoothing\\[0.3em]\large Theory, statistical model and the \texttt{nabia} implementation}
+\author{nabia documentation}
+\date{October 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This note documents \code{nabia::forecast::SimpleExponentialSmoothing}. We
+define the recursion and prove that it is an exponentially weighted average whose
+weights sum to one. We compute its mean lag and derive the span
+convention $\alpha=2/(N+1)$. We then give the statistical model behind it, the
+innovations state-space model ETS(A,N,N), and derive the forecast
+distribution, including the variance $\sigma^2(1+(h-1)\alpha^2)$. We also prove
+its equivalence with ARIMA(0,1,1) and with the steady-state Kalman filter of
+the local level model. Finally, we describe the implementation: initialization,
+variance estimate, prediction intervals and complexity.
+\end{abstract}
+
+\tableofcontents
+
+%==============================================================================
+\section{The recursion}
+
+Let $y_0,\dots,y_{T-1}$ be an equally spaced series and $\alpha\in(0,1]$ the
+smoothing factor. Simple exponential smoothing (SES)~\cite{brown1959} maintains a
+\emph{level} $\ell_t$, updated as
+\begin{equation}\label{eq:ses}
+  \ell_t = \alpha\, y_t + (1-\alpha)\,\ell_{t-1},\qquad t=0,\dots,T-1,
+\end{equation}
+from an initial level $\ell_{-1}$. Equivalently, in \emph{error-correction form},
+\begin{equation}\label{eq:error-correction}
+  e_t = y_t - \ell_{t-1},\qquad \ell_t = \ell_{t-1} + \alpha\, e_t ,
+\end{equation}
+where $e_t$ is the one-step-ahead forecast error: $\ell_{t-1}$ is the forecast
+of $y_t$ made at time $t-1$. Every forecast made at the end of the sample
+equals the final level,
+\[
+  \hat y_{T-1+h\mid T-1} = \ell_{T-1},\qquad h=1,2,\dots
+\]
+SES is therefore suited to series without trend or seasonality: it estimates the
+current level and extrapolates it flat. The value of $\alpha$ sets the trade-off
+between reacting to recent data ($\alpha\to 1$, the naive forecast $\ell_t=y_t$)
+and smoothing out noise ($\alpha\to 0$, an almost constant level).
+
+\subsection{Exponential weights}
+
+\begin{proposition}[Exponentially weighted average]\label{prop:weights}
+For $t\ge 0$,
+\begin{equation}\label{eq:weights}
+  \ell_t = \sum_{j=0}^{t} \alpha(1-\alpha)^j\, y_{t-j} + (1-\alpha)^{t+1}\,\ell_{-1},
+\end{equation}
+and the weights add up to one:
+$\sum_{j=0}^{t}\alpha(1-\alpha)^j + (1-\alpha)^{t+1} = 1$.
+\end{proposition}
+\begin{proof}
+By induction on $t$. For $t=0$, \eqref{eq:ses} gives $\ell_0=\alpha y_0+(1-\alpha)\ell_{-1}$,
+which is \eqref{eq:weights}. If \eqref{eq:weights} holds for $t-1$, then
+\[
+  \ell_t = \alpha y_t + (1-\alpha)\Big[\sum_{j=0}^{t-1}\alpha(1-\alpha)^j y_{t-1-j} + (1-\alpha)^t\ell_{-1}\Big]
+         = \alpha y_t + \sum_{j=1}^{t}\alpha(1-\alpha)^{j} y_{t-j} + (1-\alpha)^{t+1}\ell_{-1},
+\]
+which is \eqref{eq:weights} for $t$. For the sum, the geometric series gives
+$\sum_{j=0}^{t}\alpha(1-\alpha)^j = \alpha\,\frac{1-(1-\alpha)^{t+1}}{1-(1-\alpha)} = 1-(1-\alpha)^{t+1}$.
+\end{proof}
+
+So the level is a weighted average of past observations, with weights that decay
+geometrically with age. The weight on the initial level $\ell_{-1}$ vanishes as $t$ grows, so
+the choice of initialization matters only for the first $O(1/\alpha)$ steps.
+
+\begin{proposition}[Mean lag and the span convention]\label{prop:lag}
+In the limit $t\to\infty$, the weights $w_j=\alpha(1-\alpha)^j$ have mean age
+$\bar{\jmath} = \sum_j j\,w_j = (1-\alpha)/\alpha$. A simple moving average over
+the last $N$ points has mean age $(N-1)/2$. The two match when
+$\alpha = 2/(N+1)$.
+\end{proposition}
+\begin{proof}
+Differentiating the geometric series $\sum_{j\ge0}q^j=1/(1-q)$ gives
+$\sum_{j\ge0} j q^{j-1}=1/(1-q)^2$. With $q=1-\alpha$,
+$\sum_j j\,\alpha q^j = \alpha q/(1-q)^2 = (1-\alpha)/\alpha$. The moving average
+puts weight $1/N$ on ages $0,\dots,N-1$, so its mean age is $(N-1)/2$. Setting
+$(1-\alpha)/\alpha=(N-1)/2$ and solving gives $\alpha=2/(N+1)$.
+\end{proof}
+
+This is the convention behind \code{EWMA::alpha\_from\_span} in
+\code{nabia/signal}. The mean lag is also the delay with which the level
+follows a linear trend: if $y_t = a + bt$, the steady-state level is
+$\ell_t = a + b(t-\bar{\jmath})$. This lag is why trend strategies built on SES
+or EWMA signals react late, and why trend models (local linear trend in the
+Kalman filter note) extrapolate the slope instead.
+
+%==============================================================================
+\section{The statistical model: ETS(A,N,N)}
+
+On its own, \eqref{eq:ses} is only an algorithm. To attach uncertainty to the
+forecasts we need a statistical model whose optimal one-step predictor is SES.
+The standard choice is the innovations state-space model with additive error,
+no trend and no seasonality, ETS(A,N,N)~\cite{hyndman2008}:
+\begin{equation}\label{eq:ets}
+  y_t = \ell_{t-1} + \varepsilon_t,\qquad
+  \ell_t = \ell_{t-1} + \alpha\,\varepsilon_t,\qquad
+  \varepsilon_t \overset{\text{iid}}{\sim} \N(0,\sigma^2).
+\end{equation}
+A single error source drives both equations (hence ``innovations'' form).
+Given $\ell_{t-1}$, the conditional mean of $y_t$ is $\ell_{t-1}$, and
+$\varepsilon_t = y_t-\ell_{t-1} = e_t$. Substituting into the state equation gives
+exactly \eqref{eq:error-correction}. So the SES levels are the model's
+states, and the SES errors are its innovations.
+
+\begin{theorem}[Forecast distribution]\label{thm:forecast}
+Under \eqref{eq:ets}, conditionally on the information up to time $T-1$
+(that is, on $\ell_{T-1}$), for every horizon $h\ge 1$,
+\[
+  y_{T-1+h} \sim \N\!\big(\ell_{T-1},\; \sigma^2\,[1+(h-1)\alpha^2]\big).
+\]
+\end{theorem}
+\begin{proof}
+Iterating the state equation from $T-1$,
+$\ell_{T-2+h} = \ell_{T-1} + \alpha\sum_{j=1}^{h-1}\varepsilon_{T-1+j}$. Then
+\[
+  y_{T-1+h} = \ell_{T-2+h} + \varepsilon_{T-1+h}
+            = \ell_{T-1} + \alpha\sum_{j=1}^{h-1}\varepsilon_{T-1+j} + \varepsilon_{T-1+h}.
+\]
+The future innovations are independent of $\ell_{T-1}$ and of each other, with
+mean $0$ and variance $\sigma^2$. The right-hand side is therefore Gaussian with mean
+$\ell_{T-1}$ and variance $\alpha^2(h-1)\sigma^2+\sigma^2$.
+\end{proof}
+
+The point forecast is flat, but the uncertainty grows linearly in $h$. Each
+future shock moves the level permanently by $\alpha\varepsilon$, so the model is a random walk observed with noise.
+The parameter $\alpha$ sets how much of each shock is
+permanent ($\alpha\varepsilon_t$ enters the level) and how much is transitory.
+
+\subsection{Equivalence with ARIMA(0,1,1)}
+
+\begin{proposition}\label{prop:arima}
+Under \eqref{eq:ets}, the differences $\Delta y_t = y_t - y_{t-1}$ follow the
+MA(1) process $\Delta y_t = \varepsilon_t - (1-\alpha)\,\varepsilon_{t-1}$, so $y$
+is ARIMA(0,1,1) with moving-average coefficient $\theta=-(1-\alpha)$.
+\end{proposition}
+\begin{proof}
+From \eqref{eq:ets},
+$y_t - y_{t-1} = (\ell_{t-1}+\varepsilon_t)-(\ell_{t-2}+\varepsilon_{t-1}) = (\ell_{t-1}-\ell_{t-2}) + \varepsilon_t-\varepsilon_{t-1}
+= \alpha\varepsilon_{t-1}+\varepsilon_t-\varepsilon_{t-1}$.
+\end{proof}
+
+The MA polynomial $1-(1-\alpha)z$ has its root at $1/(1-\alpha)$, outside the
+unit circle for $\alpha\in(0,2)$. The process is therefore invertible, and $\varepsilon_t$ can be
+recovered from past $y$. This is what makes the recursion \eqref{eq:ses}
+forget its initialization (Proposition~\ref{prop:weights}). \code{nabia}
+restricts $\alpha$ to $(0,1]$, where all weights in \eqref{eq:weights} are
+non-negative and the level is a genuine average.
+
+\subsection{Equivalence with the Kalman filter of the local level model}
+
+The local level (random walk plus noise) model has two independent noise sources:
+\begin{equation}\label{eq:local-level}
+  x_t = x_{t-1} + w_t,\quad w_t\sim\N(0,q),\qquad
+  y_t = x_t + v_t,\quad v_t\sim\N(0,r).
+\end{equation}
+
+\begin{proposition}[Muth~\cite{muth1960}]\label{prop:muth}
+The Kalman filter for \eqref{eq:local-level} converges to the recursion
+$\hat x_t = \hat x_{t-1} + K(y_t-\hat x_{t-1})$ with steady-state gain
+\[
+  K = \frac{P}{P+r},\qquad P = \frac{q+\sqrt{q^2+4qr}}{2}.
+\]
+This is SES with $\alpha=K$. Conversely, the SES with factor $\alpha\in(0,1)$ is the steady state of
+\eqref{eq:local-level} with signal-to-noise ratio $q/r = \alpha^2/(1-\alpha)$.
+\end{proposition}
+\begin{proof}
+For this model the predicted variance $P_t=\Var(x_t\mid y_{0:t-1})$ obeys the
+Riccati recursion $P_{t+1} = P_t r/(P_t+r) + q$ (see the Kalman filter note,
+Section~6). A fixed point satisfies $P(P+r)=Pr+q(P+r)$, that is
+$P^2-qP-qr=0$, whose positive root is the $P$ above. The map
+$P\mapsto Pr/(P+r)+q$ is increasing and concave with slope $r^2/(P+r)^2<1$ at the
+fixed point, so the iteration converges to it from any $P_0\ge0$. The filtered
+estimate is $\hat x_t = \hat x_{t-1} + K_t(y_t-\hat x_{t-1})$ with
+$K_t=P_t/(P_t+r)\to K$. For the converse, $K=P/(P+r)$ gives $P=Kr/(1-K)$.
+Substituting into $P^2=q(P+r)$ gives $K^2r^2/(1-K)^2 = q\,r/(1-K)$, that is $q/r=K^2/(1-K)$.
+\end{proof}
+
+The \code{nabia} test suite checks Proposition~\ref{prop:muth} numerically. After
+300 steps, the local-level Kalman filter and an SES with $\alpha=K$ agree to
+$10^{-9}$.
+
+%==============================================================================
+\section{Estimation}
+
+\paragraph{Innovation variance.}
+Conditionally on the initial level, the likelihood of \eqref{eq:ets} factorizes
+over the one-step errors (prediction error decomposition):
+$\log L(\sigma^2) = -\frac{T}{2}\log(2\pi\sigma^2) - \frac{1}{2\sigma^2}\sum_t e_t^2$.
+Setting the derivative in $\sigma^2$ to zero gives the maximum-likelihood
+estimate
+\[
+  \hat\sigma^2 = \frac{\mathrm{SSE}}{T},\qquad \mathrm{SSE}=\sum_{t=0}^{T-1} e_t^2 .
+\]
+
+\paragraph{Smoothing factor.}
+For fixed $\sigma^2$, maximizing the likelihood in $\alpha$ amounts to minimizing
+$\mathrm{SSE}(\alpha)$. This one-dimensional function is smooth but not
+necessarily convex. \code{nabia} leaves the choice to the user: the
+\code{forecast\_demo} example scans a grid, and \code{NelderMead} on $[0,1]$
+or a golden-section search would also do.
+
+%==============================================================================
+\section{Implementation}
+
+\subsection{Interface}
+The class implements the forecaster interface
+\[
+  \code{IForecaster<SimpleExponentialSmoothingParams>}:
+\]
+\begin{lstlisting}
+SimpleExponentialSmoothing model(0.3);           // or (std::make_unique<Params>(...))
+model.fit(y);                                    // Eigen::VectorXd, finite values
+Forecast fc = model.forecast(12);                // mean and variance per step
+Eigen::VectorXd lo = fc.lower(0.95), hi = fc.upper(0.95);
+Eigen::VectorXd one_step = model.fitted_values(); // l_{t-1}, the forecast of y_t
+double sse = model.sse();
+\end{lstlisting}
+
+\subsection{Algorithm}
+\begin{algorithm}[ht]
+\caption{SES fit and forecast}\label{alg:ses}
+\begin{algorithmic}[1]
+\Require $y_0,\dots,y_{T-1}$ finite, $\alpha\in(0,1]$
+\State $\ell\gets y_0$;\; $\mathrm{SSE}\gets0$ \Comment{$\ell_{-1}=y_0$}
+\For{$t=0,\dots,T-1$}
+  \State $\hat y_t\gets\ell$ \Comment{one-step forecast, stored in \code{fitted\_values()}}
+  \State $e\gets y_t-\ell$;\; $\mathrm{SSE}\gets\mathrm{SSE}+e^2$;\; $\ell\gets\ell+\alpha e$
+\EndFor
+\State $\hat\sigma^2\gets\mathrm{SSE}/T$
+\For{$h=1,\dots,H$} \Comment{\code{forecast(H)}}
+  \State $\mu_h\gets\ell$;\; $v_h\gets\hat\sigma^2\,(1+(h-1)\alpha^2)$
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+\paragraph{Initialization.}
+The implementation uses $\ell_{-1}=y_0$, so the first error is $e_0=0$ and the
+first fitted value equals the first observation. By
+Proposition~\ref{prop:weights} the effect of this choice decays like
+$(1-\alpha)^{t}$. Because $e_0=0$ by construction, $\hat\sigma^2=\mathrm{SSE}/T$
+averages $T-1$ informative errors over $T$ terms. This slightly
+underestimates $\sigma^2$ in short samples, a bias of factor $(T-1)/T$.
+
+\paragraph{Prediction intervals.}
+\code{Forecast::lower(level)} and \code{upper(level)} return
+$\mu_h \mp z\sqrt{v_h}$ with $z=\Phi^{-1}((1+\text{level})/2)$, computed by
+\code{nabia::stats::normal\_quantile}. These are exact intervals under
+\eqref{eq:ets} with known parameters. They ignore the estimation error in
+$\alpha$ and $\sigma^2$, which makes them slightly too narrow in small samples.
+
+\paragraph{Complexity and validation.}
+Fitting is a single $O(T)$ pass with $O(T)$ memory (the fitted values), and
+forecasting is $O(H)$. The constructor rejects $\alpha\notin(0,1]$, and
+\code{fit} rejects an empty or non-finite series. \code{forecast} before
+\code{fit} throws \code{std::logic\_error}.
+
+\paragraph{Correspondence with the code.}
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+Mathematics & \code{SimpleExponentialSmoothing} \\
+\midrule
+$\alpha$ & \code{parameters().alpha} \\
+$\ell_{T-1}$ & private \code{level\_} \\
+$(\ell_{t-1})_{t}$ & \code{fitted\_values()} \\
+$\mathrm{SSE}$ & \code{sse()} \\
+$(\mu_h, v_h)$ & \code{forecast(H).mean}, \code{.variance} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Tests.}
+\code{tests/test\_exponential\_smoothing.cpp} covers several cases: a hand-computed series (levels
+$10\to15\to22.5$, $\mathrm{SSE}=325$, variances $325/3$ and $1.25\cdot325/3$),
+$\alpha=1$ as the naive forecast, invalid $\alpha$, and forecasting before
+fitting. The Kalman filter equivalence of Proposition~\ref{prop:muth} is tested
+in \code{tests/test\_forecasters.cpp}.
+
+%==============================================================================
+\begin{thebibliography}{9}
+\bibitem{brown1959} R.~G. Brown, \emph{Statistical Forecasting for Inventory Control}, McGraw-Hill, 1959.
+\bibitem{muth1960} J.~F. Muth, Optimal properties of exponentially weighted forecasts,
+  \emph{J. Amer. Statist. Assoc.} 55 (1960) 299--306.
+\bibitem{gardner1985} E.~S. Gardner, Exponential smoothing: the state of the art,
+  \emph{J. Forecasting} 4 (1985) 1--28.
+\bibitem{hyndman2008} R.~J. Hyndman, A.~B. Koehler, J.~K. Ord and R.~D. Snyder,
+  \emph{Forecasting with Exponential Smoothing: The State Space Approach}, Springer, 2008.
+\bibitem{harvey1989} A.~C. Harvey, \emph{Forecasting, Structural Time Series Models and the Kalman Filter},
+  Cambridge University Press, 1989.
+\end{thebibliography}
+
+\end{document}

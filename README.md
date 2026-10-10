@@ -1,83 +1,84 @@
 # nabia
 
-A C++20 numerical library for signal processing and time-series forecasting —
-built as a learning platform for modern C++ and CMake.
+A C++20 numerical library for researching and running **systematic trend strategies**.
 
-## Layout
+A trend strategy has four stages: it extracts a trend from noisy prices, forecasts
+where that trend is heading and how uncertain the forecast is, turns those views
+into positions sized by risk, and calibrates its own parameters. nabia provides
+the numerical building blocks for each stage, built on Eigen.
 
-```
-nabia/
-├── CMakeLists.txt          # root build: library target, options, subprojects
-├── CMakePresets.json       # debug / release / asan build configurations
-├── cmake/                  # reusable CMake modules (CompilerWarnings.cmake)
-├── include/nabia/          # PUBLIC headers  (what users #include)
-│   ├── stats/              #   descriptive statistics
-│   ├── signal/             #   smoothing, differencing
-│   └── forecast/           #   forecasting models
-├── src/                    # PRIVATE implementation (.cpp)
-├── tests/                  # Catch2 unit tests (fetched automatically)
-└── examples/               # small programs using the library
-```
+## Contents
 
-## Build & test
+### Signal extraction — `signal/`
+Causal filters (output at time t uses only data up to t, so they can run live)
+behind a common `IFilter<T>` interface. Each supports streaming (`process`) and batch (`apply`) use.
+- `EWMA` — exponentially weighted moving average, the classic trend filter.
+- `ButterworthBandPass` — isolates trend cycles within a chosen frequency band
+  (removes the level and the high-frequency noise).
+- `moving_average`, `exponential_moving_average`, `diff`.
+
+### Trend forecasting — `forecast/`
+Models behind a common `IForecaster<T>` interface: `fit(series)`,
+`forecast(horizon)` returning a mean and variance for each step ahead, and prediction intervals.
+- `KalmanFilter` — linear Gaussian state-space models. Includes local-level and
+  local-linear-trend models for the trend and its slope, missing data, a smoother
+  and the likelihood.
+- `GaussianProcess` — non-parametric trend and seasonality, with
+  squared-exponential, Matérn 5/2, periodic, sum and product kernels and
+  maximum-likelihood hyperparameters.
+- `SimpleExponentialSmoothing` — level-only baseline.
+
+### Risk and allocation — `risk/`
+Gaussian risk measures with per-asset risk contributions, used to size and combine positions.
+- `Volatility`, `ValueAtRisk`, `ExpectedShortfall`.
+- `RiskBudgeting<Measure>` — long-only weights whose risk contributions match
+  given budgets (equal risk contribution by default), for any of the measures above.
+
+### Optimization — `optimization/`
+Solvers for portfolio construction and for calibrating strategy parameters,
+behind a common `IOptimizer<T, R>` interface.
+- `convex/` — `LBFGS` (unconstrained), `AugmentedLagrangian` and `SQP`
+  (linear equality, inequality and box constraints).
+- `nongradopt/` — derivative-free `NelderMead` (box-constrained) and
+  `DifferentialEvolution` (global search, with the population evaluated in parallel).
+  Use them on noisy or non-smooth objectives such as backtest performance.
+
+### Statistics — `stats/`
+Descriptive statistics, autocorrelation, and normal density, CDF and quantile.
+
+## Building
 
 ```sh
-cmake --preset debug            # configure  -> build/debug
-cmake --build --preset debug    # compile
-ctest --preset debug            # run tests
-./build/debug/examples/forecast_demo
+cmake --preset debug && cmake --build --preset debug && ctest --preset debug
 ```
 
-Other presets: `release` (optimised), `asan` (Address + UB sanitizers — use it
-whenever you touch memory-sensitive code).
+Presets: `debug`, `release`, `asan`. Dependencies: Eigen and iir1 (fetched
+automatically if not installed), Catch2 for the tests.
 
-The build also compiles the LaTeX documentation when `pdflatex` is available
-(turn it off with `-DNABIA_BUILD_DOCS=OFF`):
-`build/debug/src/optimization/convex/docs/convex_optimization.pdf`.
+## Documentation
 
-## What's in it
+`doc/` holds LaTeX notes on the theory, proofs and implementation of the
+algorithms. Its subfolders mirror the library (`doc/forecast/`,
+`doc/optimization/convex/`, ...) and share a style file in `doc/common/`.
 
-| Module | Functions |
-|---|---|
-| `nabia::stats` | `mean`, `variance`, `stddev`, `autocorrelation`, `normal_pdf`, `normal_cdf`, `normal_quantile` |
-| `nabia::signal` | `moving_average`, `exponential_moving_average`, `diff`; filters behind `IFilter<T>`: `ButterworthBandPass`, `EWMA` (wrapping iir1) |
-| `nabia::forecast` | `SimpleExponentialSmoothing` |
-| `optimization/convex` | `LBFGS`, `AugmentedLagrangian`, `SQP`, `LinearConstraint`, `BoxConstraints` |
-| `optimization/nongradopt` | `NelderMead` (box-constrained), `DifferentialEvolution` (multithreaded population evaluation) |
-| `risk` | `Volatility`, `ValueAtRisk`, `ExpectedShortfall` (Gaussian, with Euler risk contributions), `RiskBudgeting<Measure>` |
+The PDFs are built with the library whenever `pdflatex` is installed (a TeX
+distribution such as TeX Live or MacTeX); turn them off with
+`-DNABIA_BUILD_DOCS=OFF`. To build only the documentation:
 
-## Adding a new feature (the workflow)
+```sh
+cmake --preset debug                              # once, to configure
+cmake --build --preset debug --target nabia_docs  # all PDFs
+cmake --build --preset debug --target nabia_doc_kalman_filter   # a single one
+```
 
-1. Declare it in a header under `include/nabia/<module>/`.
-2. Implement it in `src/<module>/` and add the `.cpp` to `add_library(nabia ...)`.
-3. Write tests in `tests/` and add the file to `add_executable(nabia_tests ...)`.
-4. `cmake --build --preset debug && ctest --preset debug`.
+Each PDF is compiled in the matching folder of the build tree (for example
+`build/debug/doc/forecast/kalman_filter.pdf`) and copied next to its source
+(`doc/forecast/kalman_filter.pdf`), so the current PDFs can be read directly
+from the repository. If a document fails to compile, its LaTeX log is in the
+build tree (`build/debug/doc/forecast/kalman_filter.log`). To compile one by hand
+without CMake:
 
-## Learning roadmap (suggested)
-
-**Signals**
-- [ ] Weighted / centered moving averages
-- [ ] Convolution and FIR filters
-- [ ] Discrete Fourier Transform (naive O(n²), then radix-2 FFT)
-- [ ] Butterworth / IIR filters
-
-**Forecasting**
-- [ ] Holt's linear trend (double exponential smoothing)
-- [ ] Holt-Winters (seasonal)
-- [ ] Optimise `alpha` automatically (golden-section search on SSE)
-- [ ] AR(p) via Yule-Walker, then ARIMA
-- [ ] Error metrics: MAE, RMSE, MAPE; train/test split
-
-**C++ topics along the way**
-- [ ] Templates & concepts (`std::floating_point`) to support `float` and `double`
-- [ ] A common `Forecaster` interface (virtual vs. CRTP vs. concepts)
-- [ ] Ranges and `std::views`
-- [ ] Benchmarks with Google Benchmark
-- [ ] `constexpr` where possible
-
-**CMake topics along the way**
-- [ ] `install()` + `export()` so other projects can `find_package(nabia)`
-- [ ] Shared vs. static library (`BUILD_SHARED_LIBS`, symbol visibility)
-- [ ] Optional dependency (e.g. Eigen) behind an option
-- [ ] CI with GitHub Actions
-- [ ] Code coverage and `clang-tidy` integration
+```sh
+cd doc/forecast
+TEXINPUTS=../common: pdflatex kalman_filter.tex   # run 2-3 times for references
+```

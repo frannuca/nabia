@@ -2,7 +2,6 @@
 #include <nabia/signal/smoothing.hpp>
 #include <nabia/stats/descriptive.hpp>
 
-#include <cstddef>
 #include <iostream>
 #include <vector>
 
@@ -22,12 +21,14 @@ int main() {
     }
     std::cout << "\n\n";
 
+    const Eigen::Map<const Eigen::VectorXd> y(series.data(), static_cast<Eigen::Index>(series.size()));
+
     // Pick the alpha with the lowest in-sample error.
     double best_alpha = 0.0;
     double best_sse = 0.0;
     for (double alpha : {0.1, 0.3, 0.5, 0.7, 0.9}) {
         nabia::forecast::SimpleExponentialSmoothing model(alpha);
-        model.fit(series);
+        model.fit(y);
         std::cout << "alpha = " << alpha << "  SSE = " << model.sse() << '\n';
         if (best_alpha == 0.0 || model.sse() < best_sse) {
             best_alpha = alpha;
@@ -36,12 +37,14 @@ int main() {
     }
 
     nabia::forecast::SimpleExponentialSmoothing best(best_alpha);
-    best.fit(series);
-    const auto fc = best.forecast(3);
+    best.fit(y);
+    const Forecast fc = best.forecast(3);
+    const Eigen::VectorXd lo = fc.lower(0.95);
+    const Eigen::VectorXd hi = fc.upper(0.95);
 
-    std::cout << "\nbest alpha = " << best_alpha << ", forecast:";
-    for (std::size_t h = 0; h < fc.size(); ++h) {
-        std::cout << " t+" << h + 1 << '=' << fc[h];
+    std::cout << "\nbest alpha = " << best_alpha << ", forecast (95% interval):\n";
+    for (Eigen::Index h = 0; h < fc.horizon(); ++h) {
+        std::cout << "  t+" << h + 1 << " = " << fc.mean(h) << "  [" << lo(h) << ", " << hi(h) << "]\n";
     }
     std::cout << '\n';
 }

@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.25)
 
 project(nabia
     VERSION 0.1.0
-    DESCRIPTION "Numerical library for signal processing and forecasting"
+    DESCRIPTION "Numerical library for systematic trend strategies"
     LANGUAGES CXX)
 
 # --- Options -----------------------------------------------------------------
@@ -75,6 +75,10 @@ add_library(nabia
     src/signal/ButterworthBandPass.cpp
     src/signal/EWMA.cpp
     src/forecast/exponential_smoothing.cpp
+    src/forecast/IForecaster.cpp
+    src/forecast/KalmanFilter.cpp
+    src/forecast/Kernels.cpp
+    src/forecast/GaussianProcess.cpp
     src/optimization/convex/Constraints.cpp
     src/optimization/convex/AugmentedLagrangian.cpp
     src/optimization/convex/SQP.cpp
@@ -102,6 +106,10 @@ add_library(nabia
         include/nabia/signal/IFilter.h
         include/nabia/signal/ButterworthBandPass.h
         include/nabia/signal/EWMA.h
+        include/nabia/forecast/IForecaster.h
+        include/nabia/forecast/KalmanFilter.h
+        include/nabia/forecast/Kernels.h
+        include/nabia/forecast/GaussianProcess.h
 )
 add_library(nabia::nabia ALIAS nabia)
 
@@ -129,5 +137,5 @@ if(NABIA_BUILD_EXAMPLES)
 endif()
 
 if(NABIA_BUILD_DOCS)
-    add_subdirectory(src/optimization/convex/docs)
+    add_subdirectory(doc)
 endif()
