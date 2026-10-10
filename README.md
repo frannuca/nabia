@@ -39,10 +39,12 @@ The build also compiles the LaTeX documentation when `pdflatex` is available
 
 | Module | Functions |
 |---|---|
-| `nabia::stats` | `mean`, `variance`, `stddev`, `autocorrelation` |
-| `nabia::signal` | `moving_average`, `exponential_moving_average`, `diff` |
+| `nabia::stats` | `mean`, `variance`, `stddev`, `autocorrelation`, `normal_pdf`, `normal_cdf`, `normal_quantile` |
+| `nabia::signal` | `moving_average`, `exponential_moving_average`, `diff`; filters behind `IFilter<T>`: `ButterworthBandPass`, `EWMA` (wrapping iir1) |
 | `nabia::forecast` | `SimpleExponentialSmoothing` |
-| `optimization/convex` | `LBFGS`, `AugmentedLagrangian`, `LinearConstraint`, `BoxConstraints` |
+| `optimization/convex` | `LBFGS`, `AugmentedLagrangian`, `SQP`, `LinearConstraint`, `BoxConstraints` |
+| `optimization/nongradopt` | `NelderMead` (box-constrained), `DifferentialEvolution` (multithreaded population evaluation) |
+| `risk` | `Volatility`, `ValueAtRisk`, `ExpectedShortfall` (Gaussian, with Euler risk contributions), `RiskBudgeting<Measure>` |
 
 ## Adding a new feature (the workflow)
 

@@ -20,6 +20,9 @@
   showstringspaces=false, breaklines=true
 }
 
+% Long class names in \texttt cannot hyphenate; let TeX stretch lines instead.
+\setlength{\emergencystretch}{3em}
+
 \newcommand{\R}{\mathbb{R}}
 \newcommand{\Aeq}{A_{\mathrm{eq}}}
 \newcommand{\beq}{b_{\mathrm{eq}}}
@@ -30,7 +33,7 @@
 \DeclareMathOperator*{\argmin}{arg\,min}
 \DeclareMathOperator*{\argmax}{arg\,max}
 
-\title{Convex Optimization in \texttt{nabia}\\[0.3em]\large L-BFGS and the augmented Lagrangian method: theory, algorithms and implementation}
+\title{Convex Optimization in \texttt{nabia}\\[0.3em]\large L-BFGS, the augmented Lagrangian method and SQP: theory, algorithms and implementation}
 \author{nabia documentation}
 \date{October 2026}
 
@@ -40,13 +43,16 @@
 \begin{abstract}
 This document describes the algorithms in the \texttt{nabia} module
 \texttt{optimization/convex}: the limited-memory BFGS method (\texttt{LBFGS})
-for smooth unconstrained problems, and the augmented Lagrangian method, also called the
-method of multipliers (\texttt{AugmentedLagrangian}), for smooth convex
-problems with linear equality, inequality and box constraints. We derive the
+for smooth unconstrained problems, and two solvers for smooth problems with
+linear equality, inequality and box constraints: the augmented Lagrangian
+method, also called the method of multipliers (\texttt{AugmentedLagrangian}),
+and sequential quadratic programming (\texttt{SQP}). We derive the
 augmented Lagrangian for equalities and inequalities and the multiplier updates. We then
 discuss convergence in the convex case and the practical safeguards (penalty update,
 inexact inner solves, stopping tests), and present L-BFGS as both a standalone
-solver and the inner solver.
+solver and the inner solver. Finally we derive SQP: its quadratic subproblem,
+the damped BFGS Hessian approximation and the $\ell_1$ merit function, and
+compare when each constrained solver is preferable.
 \end{abstract}
 
 \tableofcontents
@@ -60,13 +66,14 @@ solver and the inner solver.
 \toprule
 Type & Role \\
 \midrule
-\texttt{IOptimizer<T>} & Base interface: owns the parameters \texttt{T} through a \texttt{std::unique\_ptr} and declares \texttt{optimize(initial\_guess)}, which returns the solution. \\
-\texttt{LBFGS} & \texttt{IOptimizer<LBFGSParams>}; unconstrained smooth minimization (Section~\ref{sec:lbfgs}). \\
-\texttt{IConvexOptimization} & \texttt{IOptimizer<ConvexOptimizationParams>}; interface for constrained convex solvers. \\
-\texttt{AugmentedLagrangian} & \texttt{IConvexOptimization}; linearly constrained convex minimization, using \texttt{LBFGS} for its subproblems. \\
+\texttt{IOptimizer<T, R>} & Base interface: owns the parameters \texttt{T} through a \texttt{std::unique\_ptr}, declares \texttt{optimize(initial\_guess)}, which returns the solution, and \texttt{result()}, which returns the solver's result object \texttt{R}. \\
+\texttt{LBFGS} & \texttt{IOptimizer<LBFGSParams, LBFGSResult>}; unconstrained smooth minimization (Section~\ref{sec:lbfgs}). \\
+\texttt{IConvexOptimization<R>} & \texttt{IOptimizer<ConvexOptimizationParams, R>}; interface for constrained convex solvers. \\
+\texttt{AugmentedLagrangian} & \texttt{IConvexOptimization<AugmentedLagrangianResult>}; linearly constrained convex minimization, using \texttt{LBFGS} for its subproblems. \\
+\texttt{SQP} & \texttt{IConvexOptimization<SQPResult>}; linearly constrained smooth minimization with few evaluations of $f$ (Section~\ref{sec:sqp}); solves its QP subproblems with \texttt{AugmentedLagrangian}. \\
 \texttt{LinearConstraint} & $\Aeq x=\beq$ and $\Ain x\le\bin$ as Eigen matrices and vectors. \\
 \texttt{BoxConstraints} & Bounds $\ell\le x\le u$ (Section~\ref{sec:box}). \\
-\texttt{Constraints} & \texttt{std::variant<BoxConstraints, LinearConstraint>}; held as \texttt{std::optional} in \texttt{ConvexOptimizationParams}, where empty means unconstrained. \\
+\texttt{Constraints} & \texttt{std::variant<BoxConstraints, LinearConstraint>}; held as \texttt{std::optional} in \texttt{ConvexOptimizationParams}, where empty means unconstrained. \texttt{to\_linear\_constraint} converts any of them to matrix form. \\
 \bottomrule
 \end{tabular}
 \caption{Types in \texttt{nabia/optimization}.}
@@ -332,6 +339,17 @@ which gives the step a meaningful scale.
         until the Armijo condition
         $f(x_k+t d_k)\le f(x_k)+c_1 t\,\nabla f(x_k)^\top d_k$ holds
         (default $c_1=10^{-4}$). Non-finite trial values are rejected.
+  \item \emph{Approximate Wolfe acceptance.} Close to a minimizer, the decrease
+        $c_1 t\,|\nabla f^\top d|$ that Armijo demands falls below the rounding
+        error in $f$. The test then stalls even though the gradient, which
+        is still accurate, would allow progress. Following Hager and
+        Zhang~\cite{hager2005}, a step is also accepted when $f$ is flat to
+        within rounding, $f(x_k+td_k)\le f(x_k)+\epsilon_f|f(x_k)|$, and the
+        directional derivative satisfies
+        $\sigma\,\nabla f(x_k)^\top d_k \le \nabla f(x_k+td_k)^\top d_k \le (2c_1-1)\,\nabla f(x_k)^\top d_k$
+        (defaults $\epsilon_f=10^{-10}$, $\sigma=0.9$). Without this rule the risk
+        budgeting solver, for example, stalls at an accuracy of about $3\cdot 10^{-8}$ on
+        problems with hundreds of assets.
 \end{itemize}
 
 \begin{algorithm}[ht]
@@ -356,6 +374,153 @@ which gives the step a meaningful scale.
 \end{algorithm}
 
 %==============================================================================
+\section{Sequential quadratic programming}\label{sec:sqp}
+
+The augmented Lagrangian method needs many evaluations of $f$: each outer
+iteration is a full L-BFGS run. Sequential quadratic programming (SQP)
+instead builds a quadratic model of the problem at every iterate. It solves
+that model, which costs no evaluations of $f$, and takes one step. When $f$
+is expensive and $n$ is moderate (SQP stores a dense $n\times n$ matrix),
+this is usually far cheaper overall.
+
+\subsection{The QP subproblem}
+SQP is Newton's method applied to the KKT conditions. For
+\eqref{eq:problem}, linearizing the KKT system at the current iterate $x_k$
+gives the optimality conditions of the quadratic program
+\begin{equation}\label{eq:qp}
+  \min_{d\in\R^n}\; \nabla f(x_k)^\top d + \tfrac12\, d^\top B_k d
+  \quad\text{s.t.}\quad
+  \Aeq(x_k+d) = \beq,\qquad \Ain(x_k+d)\le\bin,
+\end{equation}
+with $B_k\approx\nabla^2_{xx}L(x_k,\lambda,\mu)$. Because the constraints are
+linear, two simplifications follow:
+\begin{itemize}
+  \item The linearized constraints are the constraints themselves. The QP is
+        feasible whenever \eqref{eq:problem} is, and a full step $d$ lands
+        on a feasible point, even from an infeasible $x_k$.
+  \item The constraints have zero curvature, so
+        $\nabla^2_{xx}L=\nabla^2 f$. $B_k$ only has to approximate the
+        Hessian of $f$, and the multipliers do not enter it.
+\end{itemize}
+The KKT conditions of \eqref{eq:qp} are
+\[
+  \nabla f(x_k) + B_k d + \Aeq^\top\lambda + \Ain^\top\mu = 0,\quad
+  \mu\ge 0,\quad \mu_i\big(g_i(x_k)+(\Ain d)_i\big)=0,
+\]
+plus feasibility. The QP multipliers $(\lambda,\mu)$ are therefore estimates of
+the multipliers of \eqref{eq:problem}. If $d=0$ solves the QP, then $x_k$ is
+a KKT point of the original problem.
+
+\subsection{Damped BFGS Hessian approximation}
+With $s_k=x_{k+1}-x_k$ and $y_k=\nabla f(x_{k+1})-\nabla f(x_k)$, the BFGS
+update keeps $B_k$ positive definite only if $s_k^\top y_k>0$. That always
+holds for strictly convex $f$, but can fail otherwise. Powell's damping~\cite{powell1978}
+replaces $y_k$ by
+\[
+  r_k = \theta_k y_k + (1-\theta_k) B_k s_k,\qquad
+  \theta_k = \begin{cases}
+    1 & \text{if } s_k^\top y_k \ge 0.2\, s_k^\top B_k s_k,\\[2pt]
+    \dfrac{0.8\, s_k^\top B_k s_k}{s_k^\top B_k s_k - s_k^\top y_k} & \text{otherwise,}
+  \end{cases}
+\]
+which guarantees $s_k^\top r_k\ge 0.2\,s_k^\top B_k s_k>0$, and updates
+\[
+  B_{k+1} = B_k - \frac{B_k s_k s_k^\top B_k}{s_k^\top B_k s_k} + \frac{r_k r_k^\top}{s_k^\top r_k}.
+\]
+$B_0=I$ is rescaled to $(y_0^\top y_0/s_0^\top y_0)\,I$ after the first step, as in
+L-BFGS. Positive definiteness makes every QP strictly convex, so its solution
+is unique.
+
+\subsection{Merit function and line search}
+The full step can increase $f$ or fail to make progress, so the step length
+$t$ is chosen on the $\ell_1$ merit function~\cite{han1977}
+\[
+  \phi_\nu(x) = f(x) + \nu\, V_1(x),\qquad
+  V_1(x) = \norm{h(x)}_1 + \norm{\pos{g(x)}}_1 .
+\]
+For $\nu$ larger than every multiplier, $\phi_\nu$ is an \emph{exact} penalty:
+its minimizers are the solutions of \eqref{eq:problem}.
+
+\paragraph{The QP step is a descent direction.}
+Since the constraints are linear and $d$ satisfies them,
+$V_1(x_k+td)\le(1-t)V_1(x_k)$ for $t\in[0,1]$. The directional derivative is
+therefore $D\phi_\nu(x_k;d)\le\nabla f^\top d-\nu V_1(x_k)$. From the QP
+optimality conditions, $\Aeq d=-h$, and complementarity gives $\mu^\top\Ain d=-\mu^\top g$. Hence
+\[
+  \nabla f^\top d = -d^\top B_k d + \lambda^\top h + \mu^\top g
+  \le -d^\top B_k d + \norm{(\lambda,\mu)}_\infty V_1(x_k),
+\]
+using $\mu\ge 0$ and $\mu^\top g\le\mu^\top\pos{g}$. So
+\[
+  D\phi_\nu(x_k;d) \le -d^\top B_k d - \big(\nu - \norm{(\lambda,\mu)}_\infty\big)\,V_1(x_k) < 0
+\]
+whenever $d\ne 0$ and $\nu>\norm{(\lambda,\mu)}_\infty$. The implementation keeps
+$\nu\gets\max\{\nu,\norm{(\lambda,\mu)}_\infty+\delta\}$ with $\delta=10^{-3}$ and backtracks from $t=1$
+until the Armijo condition
+$\phi_\nu(x_k+td)\le\phi_\nu(x_k)+c_1 t\,(\nabla f^\top d-\nu V_1(x_k))$ holds.
+
+\paragraph{Convergence.}
+Every accepted step decreases the merit function, which makes the method robust
+from poor (even infeasible) starting points. Under standard assumptions (bounded
+$B_k$ and multipliers) the iterates approach KKT points.
+Near a solution that satisfies the standard second-order conditions, the full step $t=1$
+is eventually accepted. Convergence is then superlinear with a BFGS
+approximation, and quadratic with the exact Hessian~\cite{nocedal2006}.
+
+\paragraph{Stopping test.}
+At each iterate the QP multipliers give the KKT residuals
+\[
+  \norm{\nabla f(x_k)+\Aeq^\top\lambda+\Ain^\top\mu}_\infty,\qquad
+  \max\{\norm{h(x_k)}_\infty,\norm{\pos{g(x_k)}}_\infty\},\qquad
+  \norm{\mu\odot g(x_k)}_\infty ,
+\]
+that is, stationarity (which equals $\norm{B_k d}_\infty$), feasibility and complementarity.
+SQP stops when all three are below \texttt{tolerance}.
+
+\paragraph{Solving the QP.}
+Without constraints, \eqref{eq:qp} is solved directly by a Cholesky factorization, $d=-B_k^{-1}\nabla f$.
+Otherwise it is a strictly convex QP with linear constraints, which
+\texttt{AugmentedLagrangian} solves to a tolerance of $10^{-10}$.
+This costs no evaluations of $f$, and also gives the multipliers.
+
+\begin{algorithm}[ht]
+\caption{SQP with damped BFGS and $\ell_1$ merit line search}\label{alg:sqp}
+\begin{algorithmic}[1]
+\Require $x_0$ (may be infeasible), tolerance \texttt{tol}, $\nu_0>0$
+\State $B\gets I$
+\For{$k=0,1,\dots,\texttt{max\_iter}-1$}
+  \State $(d,\lambda,\mu)\gets$ solution and multipliers of the QP \eqref{eq:qp} at $x_k$
+  \If{stationarity, feasibility and complementarity at $x_k$ are $\le\texttt{tol}$} \Return $(x_k,\lambda,\mu)$ \EndIf
+  \State $\nu\gets\max\{\nu,\norm{(\lambda,\mu)}_\infty+\delta\}$
+  \State $t\gets 1$; \textbf{while} $\phi_\nu(x_k+td)>\phi_\nu(x_k)+c_1t(\nabla f^\top d-\nu V_1(x_k))$ \textbf{do} $t\gets t/2$
+  \State \textbf{if} the line search fails \textbf{then} reset $B\gets I$ and retry (stop if $B$ already was $I$)
+  \State $x_{k+1}\gets x_k+td$;\; $s\gets x_{k+1}-x_k$;\; $y\gets\nabla f(x_{k+1})-\nabla f(x_k)$
+  \State $B\gets$ damped BFGS update of $B$ with $(s,y)$ \Comment{rescale $B$ first, at $k=0$}
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Choosing a constrained solver}
+\begin{table}[ht]
+\centering
+\begin{tabular}{@{}l>{\raggedright\arraybackslash}p{5.2cm}>{\raggedright\arraybackslash}p{5.2cm}@{}}
+\toprule
+ & Augmented Lagrangian & SQP \\
+\midrule
+Memory & $O(Mn)$ (L-BFGS pairs) & $O(n^2)$ (dense $B$) \\
+Evaluations of $f$ & many (one L-BFGS run per outer step) & few (one QP per step) \\
+Work per step & cheap & a QP solve \\
+Local rate & linear & superlinear \\
+Best for & large $n$, cheap $f$ & moderate $n$, expensive $f$ \\
+\bottomrule
+\end{tabular}
+\caption{Trade-offs between the two constrained solvers.}
+\end{table}
+On the 5-variable simplex problem of the test suite, with a non-quadratic $f$, SQP converges in 12
+iterations using 15 evaluations of $f$. The augmented Lagrangian
+needs 89 L-BFGS iterations to reach the same point.
+
+%==============================================================================
 \section{Box constraints}\label{sec:box}
 
 \texttt{BoxConstraints} $\ell\le x\le u$ are turned into rows of $\Ain x\le\bin$.
@@ -365,6 +530,9 @@ vector means that side is unbounded. In \texttt{result().mu\_ineq} the upper-bou
 multipliers come first (in index order), followed by the lower-bound
 multipliers.
 Bounds with $\ell_i>u_i$ are rejected with \texttt{std::invalid\_argument}.
+The conversion is the public function \texttt{to\_linear\_constraint}
+(\texttt{Constraints.h}), which both constrained solvers use, so their
+multiplier vectors follow the same row order.
 
 %==============================================================================
 \section{Using the implementation}
@@ -420,6 +588,23 @@ The result type \texttt{AugmentedLagrangianResult} reports \texttt{x},
 \texttt{stationarity}, the final \texttt{penalty}, the outer and total inner
 iteration counts, and \texttt{converged}.
 
+\subsection{Sequential quadratic programming}
+\texttt{SQP} has the same constructor and
+\texttt{optimize} signature as \texttt{AugmentedLagrangian}, so switching
+between them is a one-word change:
+\begin{lstlisting}
+#include <nabia/optimization/convex/SQP.h>
+
+SQP solver(std::move(params), f, grad_f);
+Eigen::VectorXd x = solver.optimize(x0);           // x0 may be infeasible
+const auto& r = solver.result();   // r.lambda_eq, r.mu_ineq, r.evaluations, ...
+\end{lstlisting}
+\texttt{SQPOptions} holds \texttt{qp\_tolerance} ($10^{-10}$), \texttt{qp\_max\_iter} (200),
+the line-search constants \texttt{merit\_c1} ($10^{-4}$), \texttt{backtrack} (0.5) and
+\texttt{max\_line\_search} (40), and the merit penalty settings \texttt{initial\_merit\_penalty} ($\nu_0=1$) and
+\texttt{merit\_penalty\_margin} ($\delta=10^{-3}$). \texttt{SQPResult} reports the solution,
+the multipliers, the three KKT residuals, and the iteration and evaluation counts.
+
 \subsection{L-BFGS on its own}
 \begin{lstlisting}
 #include <nabia/optimization/convex/LBFGS.h>
@@ -439,7 +624,8 @@ if (!solver.result().converged()) { /* inspect solver.result().status */ }
 \end{lstlisting}
 \texttt{LBFGSParams} holds \texttt{dim}, \texttt{tolerance} (default
 $10^{-8}$), \texttt{max\_iter} ($1000$), \texttt{memory} ($10$) and the line-search
-constants \texttt{armijo\_c1}, \texttt{backtrack}, \texttt{max\_line\_search}.
+constants \texttt{armijo\_c1}, \texttt{backtrack}, \texttt{max\_line\_search}, \texttt{flat\_tolerance}
+($\epsilon_f$) and \texttt{wolfe\_c2} ($\sigma$).
 \texttt{LBFGSResult::status} is \texttt{Converged}, \texttt{MaxIterations} or
 \texttt{LineSearchFailed}.
 
@@ -452,7 +638,7 @@ the tolerances assume a well-scaled problem. If the solver ends with
 infeasible or badly scaled.
 
 %==============================================================================
-\begin{thebibliography}{9}
+\begin{thebibliography}{99}
 \bibitem{hestenes1969}
 M.~R. Hestenes, Multiplier and gradient methods,
 \emph{J. Optim. Theory Appl.} 4 (1969) 303--320.
@@ -488,6 +674,18 @@ J.~Nocedal and S.~J. Wright, \emph{Numerical Optimization}, 2nd ed., Springer,
 \bibitem{birgin2014}
 E.~G. Birgin and J.~M. Mart\'inez, \emph{Practical Augmented Lagrangian Methods
 for Constrained Optimization}, SIAM, 2014.
+\bibitem{powell1978}
+M.~J.~D. Powell, A fast algorithm for nonlinearly constrained optimization
+calculations, in G.~A. Watson (ed.), \emph{Numerical Analysis}, Lecture Notes in
+Mathematics 630, Springer, 1978, 144--157.
+
+\bibitem{han1977}
+S.-P. Han, A globally convergent method for nonlinear programming,
+\emph{J. Optim. Theory Appl.} 22 (1977) 297--309.
+
+\bibitem{hager2005}
+W.~W. Hager and H. Zhang, A new conjugate gradient method with guaranteed
+descent and an efficient line search, \emph{SIAM J. Optim.} 16 (2005) 170--192.
 \end{thebibliography}
 
 \end{document}

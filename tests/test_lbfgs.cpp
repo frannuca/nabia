@@ -5,6 +5,7 @@
 
 #include <memory>
 #include <stdexcept>
+#include <type_traits>
 
 using Catch::Matchers::WithinAbs;
 using Eigen::VectorXd;
@@ -86,4 +87,19 @@ TEST_CASE("lbfgs: invalid input", "[optimization]") {
     bad_memory->memory = 0;
     LBFGS zero_memory(std::move(bad_memory), f, df);
     CHECK_THROWS_AS(zero_memory.optimize(std::nullopt), std::invalid_argument);
+}
+
+TEST_CASE("optimizers expose optimize() and result() through IOptimizer<T, R>", "[optimization]") {
+    // Generic code can run any optimizer and inspect its typed result via the base class.
+    auto run = []<typename T, typename R>(IOptimizer<T, R>& optimizer) -> const R& {
+        optimizer.optimize(std::nullopt);
+        return optimizer.result();
+    };
+    LBFGS solver(make_params(2), [](const VectorXd& x) { return (x - VectorXd::Ones(2)).squaredNorm(); },
+                 [](const VectorXd& x) -> VectorXd { return 2.0 * (x - VectorXd::Ones(2)); });
+    const LBFGSResult& r = run(solver);
+    CHECK(r.converged());
+    CHECK(&r == &solver.result());
+    static_assert(std::is_same_v<LBFGS::Result, LBFGSResult>);
+    static_assert(std::is_same_v<LBFGS::Params, LBFGSParams>);
 }

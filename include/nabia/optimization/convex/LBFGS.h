@@ -17,6 +17,11 @@ struct LBFGSParams {
     double armijo_c1 = 1e-4;   // sufficient decrease constant
     double backtrack = 0.5;    // step shrink factor in the line search
     int max_line_search = 60;
+    // Approximate Wolfe test (Hager & Zhang 2005), used once f stops changing
+    // beyond rounding: accept if f <= f0 + flat_tolerance |f0| and the slope
+    // along d rose from s0 to within [wolfe_c2 s0, (2 c1 - 1) s0].
+    double flat_tolerance = 1e-10;
+    double wolfe_c2 = 0.9;
 };
 
 enum class LBFGSStatus {
@@ -40,7 +45,7 @@ struct LBFGSResult {
 /// Uses the two-loop recursion for the search direction and Armijo
 /// backtracking for the step; curvature pairs with s'y <= 0 are skipped so the
 /// implicit inverse Hessian stays positive definite.
-class LBFGS: public IOptimizer<LBFGSParams> {
+class LBFGS: public IOptimizer<LBFGSParams, LBFGSResult> {
 public:
     /// Returns f(x) and writes grad f(x) into `grad` (already sized to dim).
     using ValueAndGradient = std::function<double(const Eigen::VectorXd& x, Eigen::VectorXd& grad)>;
@@ -54,7 +59,7 @@ public:
     /// final point; details are in result(). Throws std::invalid_argument on bad input.
     Eigen::VectorXd optimize(std::optional<Eigen::VectorXd> initial_guess) override;
 
-    [[nodiscard]] const LBFGSResult& result() const { return result_; }
+    [[nodiscard]] const LBFGSResult& result() const override { return result_; }
 
 private:
     ValueAndGradient value_and_gradient_;

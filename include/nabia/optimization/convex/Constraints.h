@@ -4,6 +4,7 @@
 
 #ifndef NABIA_CONVEX_CONSTRAINTS_H
 #define NABIA_CONVEX_CONSTRAINTS_H
+#include <optional>
 #include <variant>
 #include <vector>
 #include <Eigen/Dense>
@@ -47,5 +48,12 @@ struct LinearConstraint {
 
 /// Either box bounds or general linear constraints.
 using Constraints = std::variant<BoxConstraints, LinearConstraint>;
+
+/// Matrix form of any constraint description, with `dim` columns (zero rows
+/// when unconstrained). Box bounds become inequality rows: the finite upper
+/// bounds x_i <= u_i in index order, then the finite lower bounds -x_i <= -l_i.
+/// Empty bound vectors mean unbounded; use +-infinity per coordinate.
+/// Throws std::invalid_argument on mismatched dimensions or lower > upper.
+[[nodiscard]] LinearConstraint to_linear_constraint(const std::optional<Constraints>& constraints, Eigen::Index dim);
 
 #endif // NABIA_CONVEX_CONSTRAINTS_H

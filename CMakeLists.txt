@@ -37,18 +37,71 @@ if(NOT TARGET Eigen3::Eigen)
     FetchContent_MakeAvailable(Eigen3)
 endif()
 
+# Threads: DifferentialEvolution evaluates its population in parallel.
+find_package(Threads REQUIRED)
+
+# iir1 (IIR filter design, https://github.com/berndporr/iir1): an installed copy
+# if there is one, otherwise fetched and built as a static library. It is a
+# PRIVATE dependency: the nabia filter classes hide it behind a pimpl.
+find_package(iir CONFIG QUIET)
+if(TARGET iir::iir_static)
+    set(NABIA_IIR_TARGET iir::iir_static)
+elseif(TARGET iir::iir)
+    set(NABIA_IIR_TARGET iir::iir)
+else()
+    message(STATUS "iir1 not found, fetching it")
+    include(FetchContent)
+    set(IIR1_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+    set(IIR1_BUILD_DEMO    OFF CACHE BOOL "" FORCE)
+    set(iir_exclude "")
+    if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.28)
+        set(iir_exclude EXCLUDE_FROM_ALL)  # build only what nabia links (not the shared lib)
+    endif()
+    FetchContent_Declare(iir
+        GIT_REPOSITORY https://github.com/berndporr/iir1.git
+        GIT_TAG        1.9.5
+        GIT_SHALLOW    TRUE
+        SYSTEM         # treat iir1 headers as system headers -> no warnings from them
+        ${iir_exclude})
+    FetchContent_MakeAvailable(iir)
+    set(NABIA_IIR_TARGET iir::iir_static)
+endif()
+
 # --- Library -----------------------------------------------------------------
 add_library(nabia
     src/stats/descriptive.cpp
+    src/stats/normal.cpp
     src/signal/smoothing.cpp
+    src/signal/ButterworthBandPass.cpp
+    src/signal/EWMA.cpp
     src/forecast/exponential_smoothing.cpp
+    src/optimization/convex/Constraints.cpp
     src/optimization/convex/AugmentedLagrangian.cpp
+    src/optimization/convex/SQP.cpp
+    src/optimization/nongradopt/NelderMead.cpp
+    src/optimization/nongradopt/DifferentialEvolution.cpp
         include/nabia/optimization/IOptimizer.h
         include/nabia/optimization/convex/Constraints.h
         include/nabia/optimization/convex/IConvexOptimization.h
         include/nabia/optimization/convex/AugmentedLagrangian.h
+        include/nabia/optimization/convex/SQP.h
+        include/nabia/optimization/nongradopt/NelderMead.h
+        include/nabia/optimization/nongradopt/DifferentialEvolution.h
         src/optimization/convex/LBFGS.cpp
         include/nabia/optimization/convex/LBFGS.h
+        include/nabia/risk/IRiskMeasure.h
+        include/nabia/risk/measures/Volatility.h
+        include/nabia/risk/measures/ValueAtRisk.h
+        include/nabia/risk/measures/ExpectedShortfall.h
+        src/risk/IRiskMeasure.cpp
+        src/risk/measures/Volatility.cpp
+        src/risk/measures/ValueAtRisk.cpp
+        src/risk/measures/ExpectedShortfall.cpp
+        include/nabia/risk/RiskBudgeting.h
+        src/risk/RiskBudgeting.cpp
+        include/nabia/signal/IFilter.h
+        include/nabia/signal/ButterworthBandPass.h
+        include/nabia/signal/EWMA.h
 )
 add_library(nabia::nabia ALIAS nabia)
 
@@ -60,6 +113,7 @@ target_compile_features(nabia PUBLIC cxx_std_20)
 
 # PUBLIC: nabia headers expose Eigen types, so consumers need Eigen too.
 target_link_libraries(nabia PUBLIC Eigen3::Eigen)
+target_link_libraries(nabia PRIVATE Threads::Threads ${NABIA_IIR_TARGET})
 
 # PRIVATE: warnings apply to building nabia itself, not to its consumers.
 nabia_set_warnings(nabia)

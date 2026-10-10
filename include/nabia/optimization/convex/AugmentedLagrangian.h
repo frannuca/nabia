@@ -55,7 +55,7 @@ struct AugmentedLagrangianResult {
 /// `max_iter` caps the number of outer iterations.
 /// See src/optimization/convex/docs/convex_optimization.tex (built as
 /// convex_optimization.pdf) for the theory and the algorithm.
-class AugmentedLagrangian: public IConvexOptimization {
+class AugmentedLagrangian: public IConvexOptimization<AugmentedLagrangianResult> {
 public:
     using Objective = std::function<double(const Eigen::VectorXd&)>;
     using Gradient = std::function<Eigen::VectorXd(const Eigen::VectorXd&)>;
@@ -70,7 +70,7 @@ public:
     /// std::invalid_argument if dimensions or constraints are inconsistent.
     Eigen::VectorXd optimize(std::optional<Eigen::VectorXd> initial_guess) override;
 
-    [[nodiscard]] const AugmentedLagrangianResult& result() const { return result_; }
+    [[nodiscard]] const AugmentedLagrangianResult& result() const override { return result_; }
 
 private:
     Objective objective_;

@@ -94,7 +94,20 @@ Eigen::VectorXd LBFGS::optimize(std::optional<Eigen::VectorXd> initial_guess) {
             x_new = x + t * d;
             f_new = value_and_gradient_(x_new, g_new);
             ++result_.evaluations;
-            if (std::isfinite(f_new) && f_new <= fx + p.armijo_c1 * t * slope) {
+            if (!std::isfinite(f_new)) {
+                t *= p.backtrack;
+                continue;
+            }
+            // Armijo sufficient decrease, or Hager-Zhang's approximate Wolfe
+            // conditions when f is flat to within rounding: near the minimum
+            // the decrease in f drops below machine precision, but the
+            // directional derivative is still accurate.
+            const double new_slope = g_new.dot(d);
+            const bool armijo = f_new <= fx + p.armijo_c1 * t * slope;
+            const bool approx_wolfe = f_new <= fx + p.flat_tolerance * std::abs(fx) &&
+                                      new_slope <= (2.0 * p.armijo_c1 - 1.0) * slope &&
+                                      new_slope >= p.wolfe_c2 * slope;
+            if (armijo || approx_wolfe) {
                 accepted = true;
                 break;
             }
