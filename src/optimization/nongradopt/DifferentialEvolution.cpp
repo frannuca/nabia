@@ -10,10 +10,12 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
 #include <random>
 #include <stdexcept>
 #include <thread>
 #include <utility>
+#include <vector>
 
 using Eigen::Index;
 using Eigen::MatrixXd;
@@ -76,7 +78,21 @@ Eigen::VectorXd DifferentialEvolution::optimize(std::optional<Eigen::VectorXd> i
 
     const int hardware = static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
     const int threads = std::min(p.num_threads == 0 ? hardware : p.num_threads, static_cast<int>(np));
-    nabia::nongradopt::detail::ParallelEvaluator evaluator(threads, objective_);
+    // Jobs are candidate vectors, results their objective values; NaN counts as +inf (never selected).
+    const nabia::nongradopt::detail::ParallelEvaluator<VectorXd, double> evaluator(threads, [this](const VectorXd& x) {
+        const double v = objective_(x);
+        return std::isnan(v) ? std::numeric_limits<double>::infinity() : v;
+    });
+    // Evaluates every column of `points`, in parallel.
+    auto evaluate = [&evaluator](const MatrixXd& points, VectorXd& values) {
+        std::vector<VectorXd> jobs;
+        jobs.reserve(static_cast<std::size_t>(points.cols()));
+        for (Index j = 0; j < points.cols(); ++j) {
+            jobs.emplace_back(points.col(j));
+        }
+        const std::vector<double> results = evaluator.evaluate(jobs);
+        values = Eigen::Map<const VectorXd>(results.data(), static_cast<Index>(results.size()));
+    };
 
     result_ = DifferentialEvolutionResult{};
     result_.threads_used = evaluator.num_threads();
@@ -95,7 +111,7 @@ Eigen::VectorXd DifferentialEvolution::optimize(std::optional<Eigen::VectorXd> i
         population.col(0) = box.project(*initial_guess);
     }
     VectorXd fitness(np);
-    evaluator.evaluate(population, fitness);
+    evaluate(population, fitness);
     result_.evaluations = static_cast<int>(np);
 
     MatrixXd trials(n, np);
@@ -157,7 +173,7 @@ Eigen::VectorXd DifferentialEvolution::optimize(std::optional<Eigen::VectorXd> i
             }
         }
 
-        evaluator.evaluate(trials, trial_fitness);  // parallel
+        evaluate(trials, trial_fitness);  // parallel
         result_.evaluations += static_cast<int>(np);
 
         // Greedy selection; ties go to the trial to keep the population moving on plateaus.

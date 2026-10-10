@@ -18,6 +18,8 @@ add_executable(nabia_tests
     test_nongradopt.cpp
     test_filters.cpp
     test_forecasters.cpp
+    test_dataframe.cpp
+    test_risk_budgeting_portfolio.cpp
     test_risk_measures.cpp
     test_risk_budgeting.cpp
 )

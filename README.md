@@ -34,6 +34,26 @@ Gaussian risk measures with per-asset risk contributions, used to size and combi
 - `RiskBudgeting<Measure>` — long-only weights whose risk contributions match
   given budgets (equal risk contribution by default), for any of the measures above.
 
+### Portfolio construction and backtesting — `strategy/`
+- `RiskBudgetingPortfolio` — walk-forward backtest of a long-only risk-budgeting
+  portfolio built from a `DataFrame` of asset returns. Settings: the trailing
+  covariance window (sample or exponentially weighted), the rebalance frequency
+  (every k points), the risk measure and budgets, optional volatility targeting
+  with a leverage cap, and proportional transaction costs. Weights drift
+  between trades. The risk budgeting problems of all rebalance dates are
+  solved in parallel (`num_threads`), with results identical for every thread count.
+- Results keep the input time index: weights held each period, target weights
+  and risk contributions at each rebalance, gross and net returns, costs,
+  turnover, equity, PnL and drawdown.
+- `PerformanceMetrics` — total and annualized return, volatility, Sharpe,
+  Sortino, maximum drawdown and its duration, Calmar, hit rate, turnover and costs.
+
+### Time series containers — `dataframe/`
+`TimeSeries<Index>` and `DataFrame<Index>`: Eigen vectors and matrices with a
+strictly increasing time index. The index can be dates (`Date`), timestamps
+(`Timestamp`), integers (`Step`) or any ordered type. Supports column access by
+name, lookup and slicing by time, column selection, and simple and log returns.
+
 ### Optimization — `optimization/`
 Solvers for portfolio construction and for calibrating strategy parameters,
 behind a common `IOptimizer<T, R>` interface.

@@ -1,120 +1,85 @@
-// Private helper: evaluates an objective on many points with a fixed pool of threads.
+// Private helper: evaluates a function on many inputs with a few threads.
 #pragma once
 
-#include <atomic>
-#include <cmath>
-#include <condition_variable>
-#include <exception>
 #include <functional>
-#include <limits>
+#include <future>
 #include <mutex>
+#include <queue>
 #include <thread>
+#include <utility>
 #include <vector>
-#include <Eigen/Dense>
 
 namespace nabia::nongradopt::detail {
 
-/// Thread pool created once per optimization run. evaluate() hands out the
-/// points through an atomic counter (load balancing for uneven costs); the
-/// calling thread works too. A mutex/condition-variable handshake starts each
-/// batch and waits for all workers to finish it, which also makes every write
-/// of the batch visible to the caller. (std::barrier would do the same, but
-/// ThreadSanitizer cannot see through libc++'s implementation and reports
-/// false data races.)
+/// Work-queue evaluation with promises and futures, for any job type T and
+/// result type TResult. evaluate() wraps each input in a std::packaged_task,
+/// keeps its std::future and enqueues the task; `num_threads` threads pop tasks
+/// from the queue and run them until the queue is empty. The caller then
+/// collects every result, in input order, with future::get(), which waits for
+/// the task and rethrows its exception if it threw (the first failing input,
+/// in order, is the one reported).
+///
+/// The objective is called concurrently from several threads and must be
+/// thread-safe; the inputs must stay alive during evaluate() (they are read in place).
+template <typename T, typename TResult>
 class ParallelEvaluator {
 public:
-    using Objective = std::function<double(const Eigen::VectorXd&)>;
+    using Objective = std::function<TResult(const T&)>;
 
-    ParallelEvaluator(int num_threads, const Objective& objective) : objective_(objective) {
-        workers_.reserve(static_cast<std::size_t>(num_threads - 1));
-        for (int t = 1; t < num_threads; ++t) {
-            workers_.emplace_back([this] { worker_loop(); });
+    ParallelEvaluator(int num_threads, Objective objective)
+        : num_threads_(num_threads < 1 ? 1 : num_threads), objective_(std::move(objective)) {}
+
+    /// results[i] = objective(inputs[i]) for every input.
+    [[nodiscard]] std::vector<TResult> evaluate(const std::vector<T>& inputs) const {
+        std::queue<std::packaged_task<TResult()>> jobs;
+        std::vector<std::future<TResult>> futures;
+        futures.reserve(inputs.size());
+        for (const T& input : inputs) {
+            std::packaged_task<TResult()> job([this, &input] { return objective_(input); });
+            futures.push_back(job.get_future());
+            jobs.push(std::move(job));
         }
+
+        std::mutex mutex;  // guards jobs
+        auto consume = [&] {
+            for (;;) {
+                std::packaged_task<TResult()> job;
+                {
+                    const std::lock_guard lock(mutex);
+                    if (jobs.empty()) {
+                        return;
+                    }
+                    job = std::move(jobs.front());
+                    jobs.pop();
+                }
+                job();  // stores the result, or the exception, in the job's promise
+            }
+        };
+
+        // Declared after jobs and mutex: on any exit the consumers are joined
+        // (and finish the queue) before what they use is destroyed.
+        std::vector<std::jthread> consumers;
+        if (num_threads_ == 1) {
+            consume();
+        } else {
+            consumers.reserve(static_cast<std::size_t>(num_threads_));
+            for (int t = 0; t < num_threads_; ++t) {
+                consumers.emplace_back(consume);
+            }
+        }
+        std::vector<TResult> results;
+        results.reserve(inputs.size());
+        for (std::future<TResult>& f : futures) {
+            results.push_back(f.get());  // waits; rethrows the job's exception
+        }
+        return results;
     }
 
-    ~ParallelEvaluator() {
-        {
-            const std::lock_guard lock(mutex_);
-            stop_ = true;
-        }
-        start_cv_.notify_all();
-        // std::jthread joins on destruction
-    }
-
-    ParallelEvaluator(const ParallelEvaluator&) = delete;
-    ParallelEvaluator& operator=(const ParallelEvaluator&) = delete;
-
-    /// values(j) = objective(points.col(j)) for every column. NaN becomes +inf.
-    /// Rethrows the first exception raised by the objective, after the batch ends.
-    void evaluate(const Eigen::MatrixXd& points, Eigen::VectorXd& values) {
-        points_ = &points;
-        values_ = &values;
-        next_ = 0;
-        error_ = nullptr;
-        {
-            const std::lock_guard lock(mutex_);
-            ++batch_;
-            pending_ = workers_.size();
-        }
-        start_cv_.notify_all();
-        work();
-        std::unique_lock lock(mutex_);
-        done_cv_.wait(lock, [this] { return pending_ == 0; });
-        if (error_) {
-            std::rethrow_exception(error_);
-        }
-    }
-
-    [[nodiscard]] int num_threads() const { return static_cast<int>(workers_.size()) + 1; }
+    [[nodiscard]] int num_threads() const { return num_threads_; }
 
 private:
-    void worker_loop() {
-        std::size_t seen = 0;
-        for (;;) {
-            {
-                std::unique_lock lock(mutex_);
-                start_cv_.wait(lock, [&] { return stop_ || batch_ != seen; });
-                if (stop_) {
-                    return;
-                }
-                seen = batch_;
-            }
-            work();
-            const std::lock_guard lock(mutex_);
-            if (--pending_ == 0) {
-                done_cv_.notify_one();
-            }
-        }
-    }
-
-    void work() {
-        const Eigen::Index n = points_->cols();
-        for (Eigen::Index j = next_++; j < n; j = next_++) {
-            try {
-                const double v = objective_(points_->col(j));
-                (*values_)(j) = std::isnan(v) ? std::numeric_limits<double>::infinity() : v;
-            } catch (...) {
-                const std::lock_guard lock(error_mutex_);
-                if (!error_) {
-                    error_ = std::current_exception();
-                }
-            }
-        }
-    }
-
-    const Objective& objective_;
-    const Eigen::MatrixXd* points_ = nullptr;
-    Eigen::VectorXd* values_ = nullptr;
-    std::atomic<Eigen::Index> next_{0};
-    std::exception_ptr error_;
-    std::mutex error_mutex_;
-    std::mutex mutex_;                // guards batch_, pending_, stop_
-    std::condition_variable start_cv_;
-    std::condition_variable done_cv_;
-    std::size_t batch_ = 0;           // incremented to start a batch
-    std::size_t pending_ = 0;         // workers still busy with the current batch
-    bool stop_ = false;
-    std::vector<std::jthread> workers_;  // last member: joined before the members above are destroyed
+    int num_threads_;
+    Objective objective_;
 };
 
 } // namespace nabia::nongradopt::detail

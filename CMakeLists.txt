@@ -79,6 +79,8 @@ add_library(nabia
     src/forecast/KalmanFilter.cpp
     src/forecast/Kernels.cpp
     src/forecast/GaussianProcess.cpp
+    src/strategy/PerformanceMetrics.cpp
+    src/strategy/RiskBudgetingPortfolio.cpp
     src/optimization/convex/Constraints.cpp
     src/optimization/convex/AugmentedLagrangian.cpp
     src/optimization/convex/SQP.cpp
@@ -110,6 +112,11 @@ add_library(nabia
         include/nabia/forecast/KalmanFilter.h
         include/nabia/forecast/Kernels.h
         include/nabia/forecast/GaussianProcess.h
+        include/nabia/dataframe/TimeIndex.h
+        include/nabia/dataframe/TimeSeries.h
+        include/nabia/dataframe/DataFrame.h
+        include/nabia/strategy/PerformanceMetrics.h
+        include/nabia/strategy/RiskBudgetingPortfolio.h
 )
 add_library(nabia::nabia ALIAS nabia)
 
