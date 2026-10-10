@@ -5,6 +5,7 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include <chrono>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -71,6 +72,23 @@ TEST_CASE("dataframe: returns", "[dataframe]") {
     CHECK_THAT(r.values()(2, 1), WithinAbs(-0.20, 1e-15));
     const DataFrame<Date> lr = prices().log_returns();
     CHECK_THAT(lr.values()(1, 1), WithinAbs(std::log(1.1), 1e-15));
+}
+
+TEST_CASE("dataframe: dropping rows with missing values", "[dataframe]") {
+    constexpr double nan = std::numeric_limits<double>::quiet_NaN();
+    constexpr double inf = std::numeric_limits<double>::infinity();
+    MatrixXd v(5, 2);
+    v << 1.0, 10.0,
+         nan, 11.0,
+         3.0, 12.0,
+         4.0, inf,
+         5.0, 14.0;
+    const DataFrame<Step> df(integer_index(5), {"a", "b"}, v);
+    const DataFrame<Step> clean = df.drop_missing();
+    CHECK(clean.index() == std::vector<Step>{0, 2, 4});
+    CHECK(clean.values() == (MatrixXd(3, 2) << 1.0, 10.0, 3.0, 12.0, 5.0, 14.0).finished());
+    CHECK(clean.columns() == df.columns());
+    CHECK(DataFrame<Step>(integer_index(1), {"a"}, MatrixXd::Constant(1, 1, nan)).drop_missing().empty());
 }
 
 TEST_CASE("dataframe: integer and timestamp indices", "[dataframe]") {

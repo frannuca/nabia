@@ -102,6 +102,25 @@ public:
         return DataFrame(index_, names, std::move(out));
     }
 
+    /// Rows where every column has a finite value. Rows with a NaN or an
+    /// infinity in any column are dropped, which aligns series that do not all
+    /// have data at the same times (e.g. markets with different holidays).
+    [[nodiscard]] DataFrame drop_missing() const {
+        std::vector<Index> index;
+        std::vector<Eigen::Index> keep;
+        for (Eigen::Index i = 0; i < rows(); ++i) {
+            if (values_.row(i).allFinite()) {
+                keep.push_back(i);
+                index.push_back(index_[static_cast<std::size_t>(i)]);
+            }
+        }
+        Eigen::MatrixXd out(static_cast<Eigen::Index>(keep.size()), cols());
+        for (std::size_t k = 0; k < keep.size(); ++k) {
+            out.row(static_cast<Eigen::Index>(k)) = values_.row(keep[k]);
+        }
+        return DataFrame(std::move(index), columns_, std::move(out));
+    }
+
     /// Simple returns x[t] / x[t-1] - 1 of price-like columns. The first row is
     /// dropped, so row t of the result is the return earned over (t-1, t].
     [[nodiscard]] DataFrame pct_change() const {

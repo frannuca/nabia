@@ -1,5 +1,11 @@
 cmake_minimum_required(VERSION 3.25)
 
+# CMake >= 3.29: link each library once even when it is reached through several
+# targets (avoids macOS "ignoring duplicate libraries" linker warnings).
+if(POLICY CMP0156)
+    cmake_policy(SET CMP0156 NEW)
+endif()
+
 project(nabia
     VERSION 0.1.0
     DESCRIPTION "Numerical library for systematic trend strategies"
@@ -10,6 +16,7 @@ project(nabia
 # (not when someone pulls it in via add_subdirectory / FetchContent).
 option(NABIA_BUILD_TESTS    "Build unit tests"  ${PROJECT_IS_TOP_LEVEL})
 option(NABIA_BUILD_EXAMPLES "Build examples"    ${PROJECT_IS_TOP_LEVEL})
+option(NABIA_BUILD_APPS     "Build command-line applications" ${PROJECT_IS_TOP_LEVEL})
 option(NABIA_BUILD_DOCS     "Build PDF documentation (needs pdflatex)" ${PROJECT_IS_TOP_LEVEL})
 option(NABIA_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 
@@ -136,6 +143,14 @@ nabia_set_warnings(nabia)
 # --- Subprojects -------------------------------------------------------------
 if(NABIA_BUILD_TESTS)
     enable_testing()
+endif()
+
+# Before tests/, which adds the application unit tests when the apps are built.
+if(NABIA_BUILD_APPS)
+    add_subdirectory(apps)
+endif()
+
+if(NABIA_BUILD_TESTS)
     add_subdirectory(tests)
 endif()
 

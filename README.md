@@ -52,7 +52,8 @@ Gaussian risk measures with per-asset risk contributions, used to size and combi
 `TimeSeries<Index>` and `DataFrame<Index>`: Eigen vectors and matrices with a
 strictly increasing time index. The index can be dates (`Date`), timestamps
 (`Timestamp`), integers (`Step`) or any ordered type. Supports column access by
-name, lookup and slicing by time, column selection, and simple and log returns.
+name, lookup and slicing by time, column selection, dropping rows with missing
+values (to align series), and simple and log returns.
 
 ### Optimization — `optimization/`
 Solvers for portfolio construction and for calibrating strategy parameters,
@@ -66,6 +67,14 @@ behind a common `IOptimizer<T, R>` interface.
 ### Statistics — `stats/`
 Descriptive statistics, autocorrelation, and normal density, CDF and quantile.
 
+## Applications
+
+- `nabia_rb_backtest` (`apps/rb_backtest/`) — runs a risk budgeting backtest
+  from a CSV of asset prices and a JSON file of portfolio parameters. It writes a
+  CSV with the weights, risk contributions, transaction costs, returns, PnL,
+  equity and drawdown at every date, plus a metrics summary. See
+  `apps/rb_backtest/README.md`.
+
 ## Building
 
 ```sh
@@ -73,7 +82,28 @@ cmake --preset debug && cmake --build --preset debug && ctest --preset debug
 ```
 
 Presets: `debug`, `release`, `asan`. Dependencies: Eigen and iir1 (fetched
-automatically if not installed), Catch2 for the tests.
+automatically if not installed), nlohmann/json for the applications, Catch2
+for the tests. Turn the applications off with `-DNABIA_BUILD_APPS=OFF`.
+
+## Debugging Eigen values
+
+LLDB (the debugger CLion uses on macOS) shows Eigen objects as raw storage
+pointers. `tools/lldb/eigen_lldb.py` makes it show their values instead:
+
+```
+(Eigen::MatrixXd) m = 2x3 [[1, 2, 3], [4, 5, 6]]
+(Eigen::VectorXd) v = 4 [0.1, 0.2, 0.3, 0.4]
+```
+
+It covers `Matrix`, `Array` (dynamic or fixed size, row or column major),
+contiguous `Map` views and references to them. Expanding a variable lists its
+elements as `[i]` or `[i,j]`, and large matrices are shortened in the one-line
+summary. Enable it once by adding the import to `~/.lldbinit`, which both
+command-line `lldb` and CLion read:
+
+```sh
+echo "command script import $PWD/tools/lldb/eigen_lldb.py" >> ~/.lldbinit
+```
 
 ## Documentation
 

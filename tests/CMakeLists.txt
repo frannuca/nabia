@@ -29,3 +29,9 @@ nabia_set_warnings(nabia_tests)
 # Register each TEST_CASE individually with CTest.
 include(Catch)
 catch_discover_tests(nabia_tests)
+
+# Unit tests of the command-line application's parsing and output code.
+if(TARGET rb_backtest_core)
+    target_sources(nabia_tests PRIVATE test_rb_backtest_app.cpp)
+    target_link_libraries(nabia_tests PRIVATE rb_backtest_core)
+endif()
