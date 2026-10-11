@@ -1,0 +1,35 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "pybind11>=2.13"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "nabia"
+version = "0.1.0"
+description = "Systematic trend strategy tools: risk budgeting backtests (C++ core) and market data storage"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24", "pandas>=2.0"]
+
+[project.optional-dependencies]
+marketdata = ["sqlalchemy>=2.0", "yfinance>=0.2.40", "ccxt>=4.0"]
+postgres = ["psycopg[binary]>=3.1"]
+ai = ["anthropic[mcp]>=1.13", "mcp>=2.3", "sqlalchemy>=2.0"]
+web = ["fastapi>=0.110", "uvicorn>=0.29"]
+test = ["pytest>=7", "httpx>=0.27"]
+
+[tool.scikit-build]
+# The C++ project is the repository root; build only the extension module.
+cmake.source-dir = ".."
+cmake.build-type = "Release"
+wheel.packages = ["nabia"]
+build-dir = "build/{wheel_tag}"
+
+[tool.scikit-build.cmake.define]
+NABIA_BUILD_PYTHON = "ON"
+NABIA_BUILD_APPS = "OFF"
+NABIA_BUILD_TESTS = "OFF"
+NABIA_BUILD_EXAMPLES = "OFF"
+NABIA_BUILD_DOCS = "OFF"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

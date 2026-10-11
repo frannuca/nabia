@@ -7,6 +7,7 @@
 #include "nabia/dataframe/DataFrame.h"
 #include "nabia/dataframe/TimeSeries.h"
 #include "nabia/strategy/PerformanceMetrics.h"
+#include <algorithm>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -94,9 +95,17 @@ struct PortfolioResult {
 };
 
 namespace nabia::strategy::detail {
-/// Non-template engine; `returns` is T x N (rows = time).
+/// Budgets that take effect from a given row of the returns on.
+struct BudgetChange {
+    Eigen::Index first_row;   // first returns row whose rebalance uses these budgets
+    Eigen::VectorXd budgets;
+};
+
+/// Non-template engine; `returns` is T x N (rows = time). `schedule` (sorted
+/// by first_row, may be empty) overrides params.budgets from each first_row on.
 PortfolioComputation run_risk_budgeting_portfolio(const RiskBudgetingPortfolioParams& params,
-                                                  const Eigen::MatrixXd& returns);
+                                                  const Eigen::MatrixXd& returns,
+                                                  const std::vector<BudgetChange>& schedule = {});
 void validate(const RiskBudgetingPortfolioParams& params);
 } // namespace nabia::strategy::detail
 
@@ -136,7 +145,37 @@ public:
     /// different from the budgets.
     template <TimeIndex Index>
     [[nodiscard]] PortfolioResult<Index> run(const DataFrame<Index>& returns) const {
-        PortfolioComputation c = nabia::strategy::detail::run_risk_budgeting_portfolio(*parameters_, returns.values());
+        return make_result(returns, nabia::strategy::detail::run_risk_budgeting_portfolio(*parameters_, returns.values()));
+    }
+
+    /// Backtest with risk budgets that change over time. Row d of
+    /// `budget_schedule` (one column per asset, same columns as `returns`)
+    /// holds the budgets decided at time d: they are used by every rebalance at
+    /// or after d, until the next row. Rebalances before the first row use
+    /// parameters().budgets (equal risk if empty). Budgets are normalized per
+    /// row. Throws std::invalid_argument if the columns differ or a budget is
+    /// not positive.
+    template <TimeIndex Index>
+    [[nodiscard]] PortfolioResult<Index> run(const DataFrame<Index>& returns, const DataFrame<Index>& budget_schedule) const {
+        if (budget_schedule.columns() != returns.columns()) {
+            throw std::invalid_argument("RiskBudgetingPortfolio: budget schedule columns must match the returns columns");
+        }
+        std::vector<nabia::strategy::detail::BudgetChange> schedule;
+        schedule.reserve(static_cast<std::size_t>(budget_schedule.rows()));
+        const std::vector<Index>& index = returns.index();
+        for (Eigen::Index s = 0; s < budget_schedule.rows(); ++s) {
+            const auto first = std::lower_bound(index.begin(), index.end(), budget_schedule.time(s));
+            schedule.push_back({static_cast<Eigen::Index>(first - index.begin()), budget_schedule.values().row(s).transpose()});
+        }
+        return make_result(returns,
+                           nabia::strategy::detail::run_risk_budgeting_portfolio(*parameters_, returns.values(), schedule));
+    }
+
+    [[nodiscard]] const RiskBudgetingPortfolioParams& parameters() const { return *parameters_; }
+
+private:
+    template <TimeIndex Index>
+    static PortfolioResult<Index> make_result(const DataFrame<Index>& returns, PortfolioComputation c) {
         const std::vector<Index>& index = returns.index();
         std::vector<Index> rebalance_index;
         rebalance_index.reserve(c.rebalance_rows.size());
@@ -161,9 +200,6 @@ public:
         return r;
     }
 
-    [[nodiscard]] const RiskBudgetingPortfolioParams& parameters() const { return *parameters_; }
-
-private:
     std::unique_ptr<RiskBudgetingPortfolioParams> parameters_;
 };
 

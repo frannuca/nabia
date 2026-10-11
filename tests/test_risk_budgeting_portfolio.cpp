@@ -293,3 +293,63 @@ TEST_CASE("risk budgeting portfolio: solver errors reach the caller from worker 
     p->num_threads = 4;
     CHECK_THROWS_AS(RiskBudgetingPortfolio(std::move(p)).run(returns), std::invalid_argument);
 }
+
+TEST_CASE("risk budgeting portfolio: time-varying budget schedule", "[strategy]") {
+    const DataFrame<Date> returns = random_returns(300, 9);  // rows from 2024-01-01, daily
+    const Eigen::RowVector3d first{0.6, 0.3, 0.1};
+    const Eigen::RowVector3d second{0.2, 0.2, 0.6};
+    // Decided on row 100's date, and on a date between rows 199 and 200 (12:00 not representable
+    // with Date, so use a date missing from the index: drop row 200's date from the returns).
+    MatrixXd schedule_values(2, 3);
+    schedule_values << 6.0, 3.0, 1.0,   // normalized by the engine
+                       0.2, 0.2, 0.6;
+    const Date d1 = returns.time(100);
+    const Date d2 = returns.time(200);
+    const DataFrame<Date> schedule({d1, d2}, returns.columns(), schedule_values);
+    std::vector<Date> kept;
+    std::vector<Index> rows;
+    for (Index t = 0; t < 300; ++t) {
+        if (t != 200) {
+            kept.push_back(returns.time(t));
+            rows.push_back(t);
+        }
+    }
+    MatrixXd values(299, 3);
+    for (Index k = 0; k < 299; ++k) {
+        values.row(k) = returns.values().row(rows[static_cast<std::size_t>(k)]);
+    }
+    const DataFrame<Date> gappy(kept, returns.columns(), values);  // d2 is not in the index
+
+    auto run = [&](int threads) {
+        auto p = params(60, 7);
+        p->num_threads = threads;
+        p->budgets = VectorXd{{1.0, 1.0, 1.0}};
+        return RiskBudgetingPortfolio(std::move(p)).run(gappy, schedule);
+    };
+    const PortfolioResult<Date> res = run(1);
+    REQUIRE(res.all_converged);
+    for (Index k = 0; k < res.risk_contributions.rows(); ++k) {
+        const Date t = res.risk_contributions.time(k);
+        const Eigen::RowVector3d expected = t < d1 ? Eigen::RowVector3d::Constant(1.0 / 3.0) : (t < d2 ? first : second);
+        CHECK((res.risk_contributions.values().row(k) - expected).cwiseAbs().maxCoeff() < 1e-6);
+    }
+    // Some rebalances fall in each regime.
+    const auto count = [&](auto pred) {
+        Index n = 0;
+        for (Index k = 0; k < res.risk_contributions.rows(); ++k) {
+            n += pred(res.risk_contributions.time(k)) ? 1 : 0;
+        }
+        return n;
+    };
+    CHECK(count([&](Date t) { return t < d1; }) > 0);
+    CHECK(count([&](Date t) { return t >= d1 && t < d2; }) > 0);
+    CHECK(count([&](Date t) { return t >= d2; }) > 0);
+    CHECK(run(4).target_weights.values() == res.target_weights.values());
+
+    MatrixXd bad = schedule_values;
+    bad(1, 2) = 0.0;
+    CHECK_THROWS_AS(RiskBudgetingPortfolio(params(60, 7)).run(gappy, DataFrame<Date>({d1, d2}, returns.columns(), bad)),
+                    std::invalid_argument);
+    CHECK_THROWS_AS(RiskBudgetingPortfolio(params(60, 7)).run(gappy, schedule.select({"CMD", "EQ", "BND"})),
+                    std::invalid_argument);
+}

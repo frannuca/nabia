@@ -135,7 +135,8 @@ void validate(const RiskBudgetingPortfolioParams& p) {
     }
 }
 
-PortfolioComputation run_risk_budgeting_portfolio(const RiskBudgetingPortfolioParams& p, const MatrixXd& returns) {
+PortfolioComputation run_risk_budgeting_portfolio(const RiskBudgetingPortfolioParams& p, const MatrixXd& returns,
+                                                  const std::vector<BudgetChange>& schedule) {
     validate(p);
     const Index T = returns.rows();
     const Index N = returns.cols();
@@ -149,7 +150,28 @@ PortfolioComputation run_risk_budgeting_portfolio(const RiskBudgetingPortfolioPa
     if (p.budgets.size() != 0 && p.budgets.size() != N) {
         throw std::invalid_argument("RiskBudgetingPortfolio: budgets must have one entry per asset");
     }
-    const VectorXd budgets = p.budgets.size() == 0 ? VectorXd::Constant(N, 1.0 / static_cast<double>(N)) : p.budgets;
+    const VectorXd default_budgets =
+        p.budgets.size() == 0 ? VectorXd::Constant(N, 1.0 / static_cast<double>(N)) : p.budgets;
+    for (std::size_t s = 0; s < schedule.size(); ++s) {
+        const VectorXd& b = schedule[s].budgets;
+        if (b.size() != N || !b.allFinite() || (b.array() <= 0.0).any()) {
+            throw std::invalid_argument("RiskBudgetingPortfolio: scheduled budgets must be positive, one per asset");
+        }
+        if (s > 0 && schedule[s].first_row < schedule[s - 1].first_row) {
+            throw std::invalid_argument("RiskBudgetingPortfolio: budget schedule must be in time order");
+        }
+    }
+    // Budgets in force at a rebalance row: the last change at or before it.
+    auto budgets_at = [&](Index row) -> const VectorXd& {
+        const VectorXd* b = &default_budgets;
+        for (const BudgetChange& change : schedule) {
+            if (change.first_row > row) {
+                break;
+            }
+            b = &change.budgets;
+        }
+        return *b;
+    };
 
     PortfolioComputation c;
     c.weights = MatrixXd::Zero(T, N);
@@ -178,7 +200,7 @@ PortfolioComputation run_risk_budgeting_portfolio(const RiskBudgetingPortfolioPa
         const Index last = std::min(n_rebalances, first + kWarmStartBlock);
         for (Index k = first; k < last; ++k) {
             const Index t = c.rebalance_rows[static_cast<std::size_t>(k)];
-            Target target = solve_target(p, budgets, returns.middleRows(t - W + 1, W), warm_start);
+            Target target = solve_target(p, budgets_at(t), returns.middleRows(t - W + 1, W), warm_start);
             warm_start = target.weights / target.leverage;  // the unlevered risk budgeting weights
             targets[static_cast<std::size_t>(k)] = std::move(target);
         }

@@ -1,0 +1,697 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage{nabiadoc}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta,fit,calc}
+\usepackage{caption}
+\captionsetup[lstlisting]{justification=raggedright, singlelinecheck=false, font=small, labelfont=bf}
+
+% Source excerpts are extracted from the repository by extract_snippets.py at build time.
+\input{snippets.tex}
+\newcommand{\snippetsource}[1]{\csname snippet@#1\endcsname}
+\newcommand{\snippet}[3]{%
+  \lstinputlisting[language=#2, caption={#3\\{\footnotesize\ttfamily\snippetsource{#1}}}]{#1.txt}}
+\lstset{basicstyle=\ttfamily\scriptsize, captionpos=t, numbers=none, aboveskip=8pt, belowskip=8pt,
+        tabsize=4, keepspaces=true}
+\renewcommand{\lstlistingname}{Code}
+
+\title{nabia: Architecture and Methodology\\[0.3em]\large A systematic trend strategy platform: C++ core, Python layer, AI agents and web app}
+\author{nabia documentation}
+\date{October 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This document describes the whole nabia project: its purpose, its architecture, and the
+methodology of every component. That covers the C++ numerical core (time series, signal
+filters, forecasters, optimizers, risk measures, the walk-forward risk budgeting engine),
+the command-line application, the Python bindings, the market data pipeline, the three AI
+agents with their MCP tool servers, and the web application that operates them. Each
+method is stated precisely, and the code that implements it is shown with excerpts
+\emph{extracted from the source at build time}, each labelled with its file and line
+numbers, so the document stays in step with the code. A dedicated section explains how the
+sentiment and relevance of news articles are produced and aggregated, and what that
+implies for their use. The individual algorithms of the forecasting and convex
+optimization modules are derived in detail, with proofs, in the companion documents of
+\code{doc/forecast} and \code{doc/optimization}.
+\end{abstract}
+
+\tableofcontents
+\clearpage
+
+%==============================================================================
+\section{Purpose and overview}
+
+nabia is a platform for researching and running \emph{systematic trend strategies} across
+asset classes: equity indices, government bond futures, commodities and crypto. A trend
+strategy of this kind has four stages, and the project provides a component for each:
+
+\begin{enumerate}
+  \item \textbf{Data}: daily prices from public sources into a SQL database, kept up to
+        date incrementally (\S\ref{sec:marketdata}).
+  \item \textbf{Signals and views}: filters and forecasters that extract trends from noisy
+        prices (\S\ref{sec:signal}, \S\ref{sec:forecast}). On top of these, statistical
+        analysis and news analysis, which can be done by AI agents (\S\ref{sec:agents}).
+  \item \textbf{Allocation}: \emph{risk budgeting} decides each asset's share of
+        portfolio risk. The C++ engine turns budgets into weights, scales them to a
+        volatility target and simulates trading with costs (\S\ref{sec:risk}, \S\ref{sec:engine}).
+  \item \textbf{Evaluation and operation}: walk-forward backtests without look-ahead,
+        performance metrics, and a web application to run jobs and audit decisions
+        (\S\ref{sec:metrics}, \S\ref{sec:web}).
+\end{enumerate}
+
+The central design decision is to separate \emph{who decides the risk budgets} (a fixed rule,
+equal risk, or AI agents) from \emph{how budgets become positions} (a deterministic,
+tested numerical engine). Agents never set weights directly. They choose budgets within
+bounds, and the engine does the rest.
+
+%==============================================================================
+\section{Architecture}\label{sec:architecture}
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+  box/.style={draw, rounded corners=3pt, align=center, minimum height=9mm, font=\small, fill=white, inner sep=4pt},
+  layer/.style={draw, dashed, rounded corners=6pt, inner sep=7pt, gray},
+  arrow/.style={-{Stealth[length=2mm]}, thick, gray!70!black},
+  lbl/.style={font=\scriptsize\itshape, gray!60!black}]
+  % C++ core
+  \node[box, minimum width=22mm] (df) {dataframe};
+  \node[box, right=3mm of df, minimum width=22mm] (sig) {signal\\(iir1)};
+  \node[box, right=3mm of sig, minimum width=22mm] (fc) {forecast};
+  \node[box, right=3mm of fc, minimum width=22mm] (opt) {optimization};
+  \node[box, right=3mm of opt, minimum width=22mm] (risk) {risk};
+  \node[box, below=4mm of $(fc)!0.5!(opt)$, minimum width=60mm] (strat) {strategy: RiskBudgetingPortfolio\\(walk-forward engine, multithreaded)};
+  \node[layer, fit=(df)(risk)(strat), label={[lbl]left:C++20 core}] (core) {};
+  % apps and bindings
+  \node[box, below=9mm of strat, xshift=-38mm, minimum width=42mm] (cli) {nabia\_rb\_backtest\\(CLI: CSV + JSON)};
+  \node[box, below=9mm of strat, xshift=30mm, minimum width=52mm] (bind) {nabia.\_nabia\\(pybind11 extension)};
+  % python
+  \node[box, below=10mm of bind, minimum width=34mm] (pf) {nabia.backtest};
+  \node[box, left=4mm of pf, minimum width=34mm] (md) {nabia.marketdata};
+  \node[box, left=4mm of md, minimum width=30mm] (db) {SQL database\\(SQLite / PostgreSQL)};
+  \node[box, below=8mm of md, minimum width=34mm] (mcp) {MCP servers\\news, stats, portfolio};
+  \node[box, right=10mm of mcp, minimum width=34mm] (agents) {agents: news,\\stats, execution};
+  \node[box, below=8mm of agents, minimum width=34mm] (llm) {Claude API\\or local Ollama};
+  \node[box, left=4mm of llm, minimum width=34mm] (web) {nabia.web\\(FastAPI + JS)};
+  \node[layer, fit=(db)(pf)(mcp)(agents)(llm)(web), label={[lbl]left:Python}] (py) {};
+  \draw[arrow] (strat) -- (cli);
+  \draw[arrow] (strat) -- (bind);
+  \draw[arrow] (bind) -- (pf);
+  \draw[arrow] (md) -- (db);
+  \draw[arrow] (mcp) -- (db);
+  \draw[arrow] (mcp) -- (pf);
+  \draw[arrow] (agents) -- node[lbl, below]{tools} (mcp);
+  \draw[arrow] (agents) -- (llm);
+  \draw[arrow] (web) -- (agents);
+  \draw[arrow] (web.west) -| (db.south);
+\end{tikzpicture}
+\caption{Components and dependencies. Arrows point from a component to what it uses.}
+\label{fig:architecture}
+\end{figure}
+
+\subsection{Layers}
+\begin{description}
+  \item[C++ core] (\code{include/nabia}, \code{src}) is a static library, \code{nabia::nabia},
+        built with CMake (C++20, Eigen for linear algebra, iir1 for filter design). Every
+        module exposes abstract interfaces with a parameter struct owned through
+        \code{std::unique\_ptr}: \code{IFilter<T>}, \code{IForecaster<T>}, \code{IOptimizer<T,R>}
+        and \code{IRiskMeasure}.
+  \item[Applications] (\code{apps}): \code{nabia\_rb\_backtest} runs a backtest from a
+        prices CSV and a JSON configuration, and writes the results as CSV.
+  \item[Python bindings] (\code{python/src}): the \code{nabia.\_nabia} pybind11 module
+        exposes the engine, and the \code{nabia} package wraps it in pandas objects.
+  \item[Python packages] \code{nabia.marketdata} (download and storage),
+        \code{nabia.ai} (agents, MCP servers, pipeline) and \code{nabia.web} (web app).
+  \item[Storage] One SQL database holds prices, news, statistics reports, decisions,
+        agent transcripts, jobs and job logs. It goes through SQLAlchemy Core with
+        portable types, so moving from SQLite to PostgreSQL changes only the URL.
+\end{description}
+
+\subsection{Directory map}
+\begin{center}\small
+\begin{tabular}{@{}l>{\raggedright\arraybackslash}p{10cm}@{}}
+\toprule
+Path & Contents \\
+\midrule
+\code{include/nabia/dataframe} & \code{TimeSeries}, \code{DataFrame}, time index concept \\
+\code{include/nabia/signal} & \code{IFilter}, \code{EWMA}, \code{ButterworthBandPass}, smoothing functions \\
+\code{include/nabia/forecast} & \code{IForecaster}, SES, Kalman filter, Gaussian process, kernels \\
+\code{include/nabia/optimization} & \code{IOptimizer}; \code{convex/}: L-BFGS, augmented Lagrangian, SQP; \code{nongradopt/}: Nelder--Mead, differential evolution \\
+\code{include/nabia/risk} & \code{IRiskMeasure}, volatility, VaR, ES, \code{RiskBudgeting<Measure>} \\
+\code{include/nabia/strategy} & \code{RiskBudgetingPortfolio}, performance metrics \\
+\code{apps/rb\_backtest} & command-line backtest (CSV and JSON) \\
+\code{python/nabia} & Python package: \code{portfolio}, \code{marketdata}, \code{ai}, \code{web} \\
+\code{doc}, \code{docs} & LaTeX sources (built by CMake) and generated PDFs \\
+\code{tests}, \code{python/tests} & Catch2 and pytest suites \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Build and dependencies}
+CMake presets (\code{debug}, \code{release}, \code{asan}, \code{python}) configure the
+build with warnings treated as errors. Dependencies are found locally or fetched: Eigen,
+iir1 and Catch2 for the C++ side, nlohmann/json for the application, pybind11 for the
+bindings. The LaTeX documents, this one included, are built by a \code{nabia\_docs}
+target, which first runs \code{doc/project/extract\_snippets.py} to refresh the code
+excerpts.
+
+%==============================================================================
+\section{Time series containers}\label{sec:dataframe}
+
+All numerical code works on Eigen matrices, but financial data is indexed by time.
+\code{TimeSeries<Index>} and \code{DataFrame<Index>} pair an Eigen vector or matrix
+(rows are times) with a \emph{strictly increasing} index. The index type is any type
+satisfying the \code{TimeIndex} concept (copyable, totally ordered): calendar dates
+(\code{std::chrono::sys\_days}), timestamps, or integers. Construction validates the
+shapes, the ordering and unique column names. Lookups use binary search.
+
+Two operations matter for the methodology. \textbf{Alignment}: markets have different
+holidays, so a cross-asset backtest keeps only the dates where every asset has a price.
+\textbf{Returns}: simple returns $r_t = P_t/P_{t-1}-1$ are then computed between
+consecutive kept dates, so a return can span a gap.
+
+\snippet{df_drop_missing}{C++}{Alignment: keep rows where every column is finite}
+
+%==============================================================================
+\section{Signal extraction}\label{sec:signal}
+
+Filters implement \code{IFilter<T>}. They are causal (output $t$ uses inputs up to $t$
+only) and support both streaming (\code{process}, one sample at a time) and batch use
+(\code{apply}, from a fresh state). Filter design is delegated to the iir1 library,
+hidden behind a private implementation struct so that iir1 never appears in public
+headers.
+
+\paragraph{EWMA.} The exponentially weighted moving average is the one-pole low-pass
+$y_t=\alpha x_t+(1-\alpha)y_{t-1}$, i.e.\ $H(z)=\alpha/(1-(1-\alpha)z^{-1})$. Starting from a
+zero state biases the first outputs towards zero, so by default the filter is \emph{seeded}
+with the first sample. Since the DC gain is one, filtering $x_t-x_0$ from a zero state and
+adding $x_0$ back is exactly the recursion started at $y_{-1}=x_0$:
+\[
+  y_t = x_0 + \alpha\sum_{k\ge0}(1-\alpha)^k(x_{t-k}-x_0) = \alpha\sum_{k=0}^{t}(1-\alpha)^k x_{t-k} + (1-\alpha)^{t+1}x_0 .
+\]
+The helpers \code{alpha\_from\_span}$(N)=2/(N+1)$ (equal mean lag to an $N$-point moving
+average) and \code{alpha\_from\_halflife}$(h)=1-2^{-1/h}$ convert the usual parameterizations.
+
+\snippet{ewma_impl}{C++}{EWMA on iir1's one-pole section, with first-sample seeding}
+
+\paragraph{Butterworth band-pass.} A causal Butterworth band-pass (order $N$, so $2N$
+poles) isolates trend cycles between two frequencies. iir1 is parameterized by a centre
+and a width, so the edges $(f_\ell, f_h)$ map to centre $(f_\ell+f_h)/2$ and width
+$f_h-f_\ell$. Tests verify unit gain inside the band, $-3$\,dB at both edges and strong
+attenuation outside.
+
+%==============================================================================
+\section{Forecasting}\label{sec:forecast}
+
+Forecasters implement \code{IForecaster<T>}: \code{fit(y)}, then \code{forecast(H)}, which
+returns a mean and a predictive variance for each step, plus Gaussian prediction
+intervals. Three models are implemented, each derived with proofs in its own document
+(\code{doc/forecast}):
+\begin{itemize}
+  \item \textbf{Simple exponential smoothing}, with forecast variance
+        $\sigma^2(1+(h-1)\alpha^2)$ from its ETS(A,N,N) state-space form.
+  \item \textbf{Kalman filter} for linear Gaussian state-space models, with ready-made
+        local-level and local-linear-trend models. It uses the Joseph-form covariance
+        update, handles missing data, and provides the likelihood and the
+        Rauch--Tung--Striebel smoother.
+  \item \textbf{Gaussian process} regression on time, with squared-exponential, Mat\'ern
+        5/2, periodic, sum and product kernels. Hyperparameters are fitted by maximizing
+        the marginal likelihood with L-BFGS and analytic gradients.
+\end{itemize}
+
+%==============================================================================
+\section{Optimization}\label{sec:optimization}
+
+Optimizers implement \code{IOptimizer<T,R>}: \code{optimize(initial\_guess)} returns the
+solution, and \code{result()} returns a solver-specific result object.
+
+\paragraph{Convex and smooth.} \textbf{L-BFGS} (two-loop recursion with Armijo
+backtracking) is the workhorse; it is used inside risk budgeting and the Gaussian process.
+Near a minimum, the decrease that Armijo requires falls below the rounding error in $f$,
+and plain backtracking stalls. The line search therefore also accepts Hager--Zhang
+\emph{approximate Wolfe} steps when $f$ is flat to within rounding:
+$f(x+td)\le f(x)+\epsilon_f|f(x)|$ and $\sigma g^\top d \le g(x+td)^\top d \le (2c_1-1)g^\top d$.
+On 500-asset risk budgeting problems this took the attainable accuracy from about
+$3\cdot10^{-8}$ to $10^{-8}$.
+
+\snippet{lbfgs_line_search}{C++}{L-BFGS line search: Armijo or approximate Wolfe}
+
+The \textbf{augmented Lagrangian} (Powell--Hestenes--Rockafellar) and \textbf{SQP} (damped
+BFGS with an $\ell_1$ merit function) solve problems with linear equality, inequality and
+box constraints. Both are derived in \code{doc/optimization/convex}.
+
+\paragraph{Derivative-free.} \textbf{Nelder--Mead} uses adaptive coefficients and enforces
+box bounds by projecting every trial point. \textbf{Differential evolution} (strategies
+rand/1, best/1, current-to-best/1 and rand/2, binomial crossover, dithered $F$) evaluates
+its population in parallel. Trial vectors are generated sequentially from a seeded RNG
+before evaluation, so results do not depend on the thread count. Evaluation uses a work
+queue of \code{std::packaged\_task}s consumed by $n$ threads, and the caller collects the
+results in order through their futures:
+
+\snippet{parallel_evaluator}{C++}{ParallelEvaluator: job queue, n consumers, results via futures}
+
+%==============================================================================
+\section{Risk measures and risk budgeting}\label{sec:risk}
+
+\subsection{Risk measures}
+For a portfolio $x$ (weights) on assets with return covariance $\Sigma$ and mean $\mu$, with
+loss $L=-r^\top x$ and $r\sim\N(\mu,\Sigma)$, write $\sigma(x)=\sqrt{x^\top\Sigma x}$. Then:
+\begin{align*}
+  \text{Volatility:}\quad & R(x)=\sigma(x), & \nabla R &= \Sigma x/\sigma(x),\\
+  \text{VaR}_\alpha:\quad & R(x)=-\mu^\top x+z_\alpha\,\sigma(x), & \nabla R&=-\mu+z_\alpha\Sigma x/\sigma(x),\\
+  \text{ES}_\alpha:\quad & R(x)=-\mu^\top x+\frac{\varphi(z_\alpha)}{1-\alpha}\,\sigma(x), & \nabla R&=-\mu+\frac{\varphi(z_\alpha)}{1-\alpha}\Sigma x/\sigma(x),
+\end{align*}
+with $z_\alpha=\Phi^{-1}(\alpha)$. All three are positively homogeneous of degree one, so by
+Euler's theorem $R(x)=\sum_i x_i\,\partial_iR(x)$: the \emph{risk contributions}
+$\mathrm{RC}_i=x_i\partial_iR$ add up exactly to the total risk. At $\sigma=0$ the gradient
+is set to zero, a valid subgradient of the seminorm $\sigma$.
+
+\snippet{vol_gradient}{C++}{Volatility gradient, the building block of every measure}
+\snippet{var_measure}{C++}{Gaussian Value at Risk and its gradient}
+
+\subsection{Risk budgeting}
+Given budgets $b_i>0$ with $\sum b_i=1$, the risk budgeting portfolio is the long-only
+$x$ with $\mathrm{RC}_i(x)/R(x)=b_i$. For a convex, homogeneous $R$ that is positive on long-only
+portfolios, it is obtained from the strictly convex problem
+\[
+  \min_{y>0}\; R(y)-\sum_i b_i\log y_i ,
+\]
+whose optimality condition $\partial_iR(y)=b_i/y_i$, i.e.\ $y_i\partial_iR(y)=b_i$, is exactly
+the budget condition. By Euler's theorem $R(y)=\sum_i b_i=1$ at the optimum, and
+$x=y/\sum_iy_i$ normalizes the weights. The log barrier keeps $y$ positive: L-BFGS treats
+non-positive trial points as infeasible ($+\infty$). Because L-BFGS stops on $\norm{\nabla f}$ while
+the budget error is $\max_i|y_i\nabla_i f|$, the solver warm-restarts with a tighter
+tolerance until the budget error itself meets the target.
+
+\snippet{rb_objective}{C++}{Risk budgeting objective and gradient for any risk measure}
+
+%==============================================================================
+\section{The walk-forward portfolio engine}\label{sec:engine}
+
+\code{RiskBudgetingPortfolio} backtests a long-only risk budgeting portfolio from a
+\code{DataFrame} of returns (row $t$ holds returns over $(t-1,t]$). Its parameters cover
+estimation, allocation, execution and accounting.
+
+\subsection{Timing: no look-ahead}
+With covariance window $W$ and rebalance frequency $k$, rebalances happen at the close of
+rows $t=W-1, W-1+k, W-1+2k,\dots$. At rebalance $t$ the engine:
+\begin{enumerate}
+  \item estimates moments from rows $t-W+1,\dots,t$, all known at the close of $t$;
+  \item solves for the risk budgeting weights and scales them to the volatility target;
+  \item trades from the drifted weights to the targets.
+\end{enumerate}
+The new weights earn the returns of rows $t+1$ onwards. A test confirms there is no
+look-ahead: changing the data from row 200 on leaves every weight up to row 200
+bit-identical.
+
+\subsection{Covariance estimation}
+For the window's returns $r_1,\dots,r_W$ (oldest first) with weights $w_k$ (equal, or
+exponential with half-life $h$: $w_k\propto\lambda^{W-k}$, $\lambda=2^{-1/h}$, $\sum w_k=1$):
+\[
+  \hat\mu=\sum_k w_kr_k,\qquad
+  \hat\Sigma=\frac{\sum_k w_k(r_k-\hat\mu)(r_k-\hat\mu)^\top}{1-\sum_kw_k^2},
+\]
+the unbiased weighted estimator. With equal weights it reduces to the usual $1/(W-1)$ sample covariance.
+
+\snippet{cov_estimate}{C++}{Window moments: sample or exponentially weighted}
+
+\subsection{Allocation and volatility targeting}
+The budgets in force at rebalance $t$ are the last row of the \emph{budget schedule} dated on or
+before $t$; this is how time-varying budgets from a rule or from agents enter the backtest.
+With no schedule, the parameter budgets apply (equal risk by default). The risk budgeting
+weights $x$ (sum 1) are then scaled by the leverage
+\[
+  L=\min\!\Big(L_{\max},\;\frac{\sigma^\ast}{\sqrt{x^\top\hat\Sigma x\cdot P}}\Big),
+\]
+where $\sigma^\ast$ is the annualized volatility target and $P$ is the number of periods per year. Any weight not
+invested ($1-\sum_iw_i$) is cash earning zero.
+
+\snippet{solve_target}{C++}{Target weights of one rebalance date}
+
+\subsection{Parallel solves, sequential accounting}
+The targets of all rebalance dates depend only on their own windows, so phase 1 solves them
+in parallel. To keep warm starts (each solve starts from the previous date's weights)
+without making results depend on the thread count, dates are grouped into fixed blocks of 8
+consecutive rebalances: one block is one task, and warm starts happen only within a block.
+Results are therefore bit-identical for any number of threads. On 50 assets with daily
+rebalancing over 10 years (2,271 solves), the backtest takes 375\,ms on one thread and
+53\,ms on eight.
+
+\snippet{engine_phase1}{C++}{Phase 1: target weights of every rebalance date, in parallel}
+\snippet{parallel_for}{C++}{The thread pool helper used by phase 1}
+
+\subsection{Drift, trading costs and accounting}
+Phase 2 walks through time. With held weights $w_t$ and asset returns $r_t$:
+\begin{align*}
+  g_t&=w_t^\top r_t &&\text{gross return,}\\
+  w&\leftarrow w_t\odot(1+r_t)/(1+g_t) &&\text{drift (holdings grow, cash does not),}\\
+  \tau_t&=\norm{w^{\text{target}}-w}_1,\quad c_t=\kappa\,\tau_t &&\text{turnover and proportional cost,}\\
+  n_t&=(1+g_t)(1-c_t)-1 &&\text{net return; equity}\;E_t=E_{t-1}(1+n_t).
+\end{align*}
+Costs are paid out of equity at the close. The first trade buys the whole portfolio from
+cash, so its turnover equals the sum of the weights. These identities are checked to
+$10^{-15}$ in the tests.
+
+\snippet{engine_phase2}{C++}{Phase 2: earn returns, drift, trade, account}
+
+%==============================================================================
+\section{Performance metrics}\label{sec:metrics}
+
+From the net returns $n_1,\dots,n_T$ (from the first trade on) and $P$ periods per year:
+\begin{center}\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+Metric & Definition \\
+\midrule
+Total return & $\prod_t(1+n_t)-1$ \\
+Annualized return (CAGR) & $(1+\text{total})^{P/T}-1$ \\
+Annualized volatility & $\mathrm{sd}(n)\sqrt P$ (sample standard deviation) \\
+Sharpe ratio & $\bar n\,P/(\mathrm{sd}(n)\sqrt P)$ (zero risk-free rate) \\
+Sortino ratio & $\bar n\,P/\big(\sqrt{\tfrac1T\sum_t\min(n_t,0)^2}\sqrt P\big)$ \\
+Maximum drawdown & $\max_t\big(1-E_t/\max_{s\le t}E_s\big)$ \\
+Max drawdown duration & longest run of periods below a previous peak \\
+Calmar ratio & annualized return / maximum drawdown \\
+Hit rate & fraction of periods with $n_t>0$ \\
+Turnover & average $\tau$ per rebalance; annualized $\sum_t\tau_t\,P/T$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\snippet{performance}{C++}{Performance metrics}
+
+%==============================================================================
+\section{Command-line application and Python bindings}\label{sec:bindings}
+
+\code{nabia\_rb\_backtest} reads prices from a CSV (ISO dates, one column per asset;
+missing values are dropped by date alignment) and portfolio parameters from JSON. It
+writes a CSV row per date with the weights, risk contributions on rebalance dates,
+turnover, costs, returns, PnL, equity and drawdown. Unknown JSON keys are rejected, so
+typos fail loudly.
+
+The Python module reuses exactly this pipeline and the same JSON parser, so Python and the
+CLI accept the same parameters with the same error messages. Dates cross the boundary as
+\code{int64} days since 1970-01-01 (numpy \code{datetime64[D]}), prices as a
+\code{float64} matrix, and parameters as JSON text. The GIL is released during the C++
+computation, so the engine's threads run in parallel.
+
+\snippet{binding_prepare}{C++}{Shared preparation: parse, align, window, returns, budgets}
+\snippet{binding_backtest_core}{C++}{The engine call, with the GIL released}
+\snippet{py_backtest_inputs}{Python}{pandas to C++: dates, names, values, JSON parameters}
+
+%==============================================================================
+\section{Market data}\label{sec:marketdata}
+
+\subsection{Universe and sources}
+The default universe has four asset classes: equity indices (S\&P 500, Nasdaq 100, Euro
+Stoxx 50, DAX, FTSE, Nikkei, Hang Seng and others), US Treasury futures (2Y to Ultra
+bond), commodity futures (energy, metals, grains) and spot crypto (BTC, ETH, SOL, XRP, ADA,
+LTC against USD). Each asset records which source provides it:
+\begin{itemize}
+  \item \textbf{Yahoo Finance} (through \code{yfinance}) for indices and futures. Futures
+        tickers are front-month continuous series that jump at contract rolls. WTI went
+        negative on 2020-04-20, where simple returns are undefined, so the examples use
+        Brent.
+  \item \textbf{Crypto exchanges} through \code{ccxt} (Coinbase by default; public data,
+        no key). History is paged in windows of 300 candles. Windows before a coin's
+        listing date come back empty and are stepped over, and paging stops if the
+        exchange ignores the start date.
+\end{itemize}
+
+\snippet{crypto_fetch}{Python}{Crypto daily candles with pagination}
+
+\subsection{Storage and incremental updates}
+Prices are stored per (symbol, date) with open, high, low, close, adjusted close and
+volume. Writes are \emph{upserts} (\code{INSERT ... ON CONFLICT DO UPDATE}, in SQLite and
+PostgreSQL syntax), so re-downloading is idempotent and picks up revisions. Updates are
+incremental: a stored symbol is re-fetched from five days before its last date, so recent
+revisions are corrected. Symbols are grouped by source and start date to batch requests.
+
+\snippet{upsert_rows}{Python}{Portable upsert (SQLite and PostgreSQL)}
+\snippet{update_market_data}{Python}{Incremental download with overlap, routed by source}
+
+%==============================================================================
+\section{AI agents}\label{sec:agents}
+
+\subsection{Roles and data flow}
+Three agents share one database. Each agent reaches the database only through tools served by local
+MCP servers:
+\begin{center}\small
+\begin{tabular}{@{}l>{\raggedright\arraybackslash}p{5.2cm}>{\raggedright\arraybackslash}p{5.4cm}@{}}
+\toprule
+Agent & Tools & Output \\
+\midrule
+News analyzer & \code{news} server (RSS feeds, store, query, summary); web search and fetch on Claude & articles with topic, assets, sentiment, relevance (\S\ref{sec:sentiment}) \\
+Stats analyzer & \code{stats} server (correlations, volatilities, trend signals, regime, reports) & a structured report with a budget tilt per asset \\
+Execution agent & \code{news} and \code{stats} (read-only), \code{portfolio} server & risk budgets with a rationale, and target weights from the C++ engine \\
+\bottomrule
+\end{tabular}
+\end{center}
+The daily pipeline runs news, then stats, then execution. In backtest mode only stats and
+execution run, at each decision date (\S\ref{sec:backtest-mode}).
+
+\subsection{MCP servers and point-in-time tools}
+Each server is a standalone stdio MCP server (\code{python -m nabia.ai.servers.<name>}),
+usable by the agents or by any MCP client. Three properties matter:
+\begin{itemize}
+  \item \textbf{As-of discipline.} Every analytical tool takes an \code{as\_of} date and
+        reads only data dated on or before it. A test rewrites all prices after
+        \code{as\_of} and checks that every tool's output is unchanged.
+  \item \textbf{Errors the model can use.} Anticipated failures (wrong symbols,
+        out-of-range values) are raised as MCP \code{ToolError}s with their message, so the
+        model sees why a call failed and can correct it. Any other exception would reach
+        the model only as a generic error.
+  \item \textbf{Read-only mode} removes writing tools. The execution agent cannot store
+        news or overwrite statistics reports.
+\end{itemize}
+
+\snippet{parse_as_of}{Python}{The as-of date bounding every query}
+\snippet{tool_decorator}{Python}{Tool registration: anticipated errors reach the model}
+
+\subsection{The agent loop}
+The runtime starts the agent's MCP servers as subprocesses, lists their tools, and runs a
+manual tool-use loop. It handles parallel tool calls (all results go back in one message),
+paused turns of hosted tools, refusals and turn limits, and records every call for the audit
+trail.
+\begin{description}
+  \item[Claude] (\code{provider: "anthropic"}): \code{claude-opus-5-5} with adaptive
+        thinking, a per-agent effort level, prompt caching of the stable prefix, and
+        server-side refusal fallbacks.
+  \item[Local] (\code{provider: "ollama"}): an adapter with the same interface translates the
+        requests and replies to Ollama's chat API: tool definitions, tool calls as
+        \code{tool\_calls}, tool results as \code{tool} messages. Claude-only options are
+        ignored, and hosted web tools are dropped (local news comes from RSS).
+\end{description}
+
+\snippet{runtime_loop}{Python}{The agent loop}
+\snippet{runtime_call_tool}{Python}{Executing one tool call on its MCP server}
+\snippet{ollama_response}{Python}{Ollama replies translated to Anthropic-style blocks}
+
+\subsection{Statistics computed for the stats analyzer}
+All statistics come from daily close prices up to \code{as\_of}. Volatilities are
+annualized with $\sqrt{252}$.
+\begin{itemize}
+  \item \textbf{Aligned returns} for cross-asset statistics: dates where all assets have a
+        price, then simple returns.
+  \item \textbf{Correlation} of the last $w$ aligned returns (60 by default) and the
+        \textbf{average correlation} $\frac{1}{n(n-1)}\sum_{i\ne j}\rho_{ij}$.
+  \item \textbf{Rolling volatility} of each asset's own returns over 20, 60 and 120 days,
+        and the \textbf{volatility percentile}: the fraction of the last 252 rolling 20-day
+        volatilities that are at or below today's.
+  \item \textbf{Trend signals}: returns over 21, 63, 126 and 252 observations; distance from
+        the 50- and 200-day moving averages, $P_T/\overline{P}_{n}-1$; the
+        \textbf{volatility-scaled 12-1 momentum}
+        \[ m=\frac{P_{T-21}/P_{T-252}-1}{\mathrm{sd}(r_{T-251..T})\sqrt{252}} ,\]
+        which skips the last month (short-term reversal) and measures the trend in units
+        of the asset's own risk; and the current and 1-year maximum drawdowns.
+  \item \textbf{Market regime}: the average correlation over 60 and 252 days, the median
+        volatility percentile, and the share of assets above their 200-day average or up
+        over 12 months.
+\end{itemize}
+
+\snippet{trend_signals}{Python}{Trend signals}
+\snippet{rolling_volatility}{Python}{Volatilities and their percentile}
+
+\subsection{From decisions to positions}
+The execution agent proposes positive relative budgets with a written rationale. The
+tool \code{set\_risk\_budgets} normalizes them and enforces the bounds
+$[b_{\min},b_{\max}]$ by iterative projection: values beyond a bound are fixed at it, and the
+rest are rescaled to fill the remainder, until nothing is out of bounds.
+\code{compute\_target\_weights} then runs the C++ engine on prices up to \code{as\_of}
+(\code{nabia.latest\_weights}) and stores the weights with the decision. Each decision
+records the model that made it, e.g.\ \code{agent:ollama:qwen3.8:latest}.
+
+\snippet{project_budgets}{Python}{Budget normalization within bounds}
+\snippet{set_risk_budgets}{Python}{The decision tool}
+\snippet{compute_weights}{Python}{Budgets to target weights through the C++ engine}
+
+\subsection{The trend rule baseline}
+A transparent, model-free policy serves as the benchmark that agent policies must beat:
+\[
+  b_i\;\propto\;1+s\cdot\mathrm{clip}(m_i,-1,1),\qquad s=0.5,
+\]
+followed by the same bounded normalization. A strong uptrend gets up to $1.5\times$ the
+equal budget and a strong downtrend $0.5\times$. Over 2019--2026 on the default universe
+with monthly decisions it reached a Sharpe ratio of 0.96, against 0.92 for equal risk.
+
+\snippet{trend_tilted_budgets}{Python}{The trend rule}
+
+\subsection{Backtest mode}\label{sec:backtest-mode}
+At each decision date (every trading day, week, month or quarter end), the policy decides
+budgets as of that date. Policies are the trend rule, the agents on the local model, the
+agents on Claude, or the agents on the configured provider. The decisions form a budget schedule that drives one
+continuous backtest, compared with equal risk budgets over the same period. Decisions are
+stored per run, so interrupted backtests resume.
+
+\snippet{decision_dates}{Python}{Decision dates}
+\snippet{evaluate_decisions}{Python}{Decisions to a continuous backtest, against equal risk}
+
+\paragraph{Look-ahead control.} The tools cannot see the future. In backtests, news comes
+only from the database (no web access), and the prompt instructs the model to treat the
+decision date as the present. One leak cannot be closed by tooling: a language model was
+trained on data up to its knowledge cutoff and may recognize market history before it.
+Agent backtests inside that window are therefore optimistic. They are fully out-of-sample
+only after the cutoff.
+
+\snippet{as_of_rule}{Python}{The as-of rule given to every agent}
+
+%==============================================================================
+\section{News: collection, sentiment and relevance}\label{sec:sentiment}
+
+\subsection{Collection}
+The news analyzer runs once per day in live mode:
+\begin{enumerate}
+  \item It calls \code{query\_news} to see what is already stored, so nothing is stored twice.
+  \item It gathers candidate stories:
+        \begin{itemize}
+          \item \code{fetch\_news\_feeds} reads public RSS and Atom feeds (MarketWatch,
+                CNBC, Financial Times, Investing.com, CoinDesk, OilPrice, the Federal
+                Reserve, the ECB and the Bank of England; configurable). It keeps items
+                published within the last $d$ days and removes URLs already in the
+                database. A broken feed is reported without hiding the others.
+          \item On Claude, web search and fetch also fill gaps and confirm stories.
+        \end{itemize}
+  \item It keeps the 8--20 most material stories, classifies each, and stores them with
+        \code{store\_news\_articles}, keyed by URL.
+\end{enumerate}
+
+\snippet{fetch_news_feeds}{Python}{RSS and Atom headlines, without already-stored articles}
+
+\subsection{How sentiment and relevance are produced}
+\textbf{Sentiment and relevance are judgements made by the language model for each article.
+They are not computed by a statistical model or a word list.} The news analyzer reads the
+headline and description (and, on Claude, possibly the article) and assigns the fields of
+the \code{NewsArticle} schema following the rubric in its instructions:
+\begin{description}
+  \item[Sentiment] $s\in[-1,1]$: the \emph{expected price impact on the affected assets}:
+        $-1$ clearly bearish, $+1$ clearly bullish, $0$ neutral or mixed. It is defined
+        relative to the assets the story moves, not as the tone of the text. A hawkish
+        central bank is bearish for bonds even when the article sounds upbeat.
+  \item[Relevance] $r\in[0,1]$: the importance of the story for a cross-asset portfolio:
+        1 for portfolio-wide shocks, about 0.5 for stories that move one asset class,
+        lower for minor items.
+  \item[Classification] a topic from a fixed list (monetary policy, inflation, growth,
+        labor, earnings, fiscal, geopolitics, energy, metals, agriculture, crypto, rates,
+        credit, FX, regulation, other), the affected asset classes, and the portfolio
+        symbols directly affected.
+\end{description}
+
+\snippet{news_system}{Python}{The news analyzer's instructions, which define the rubric}
+
+The server validates what the model produces before storing it:
+\begin{itemize}
+  \item the schema bounds ($s\in[-1,1]$, $r\in[0,1]$, a topic from the list, valid asset classes);
+  \item no publication dates in the future;
+  \item symbols must belong to the portfolio universe.
+\end{itemize}
+Invalid articles are rejected with a reason the model can act on.
+
+\snippet{news_article}{Python}{The article schema: bounds and meaning of each field}
+\snippet{store_news_articles}{Python}{Validation before storage}
+
+\subsection{Aggregation}
+Agents and the web app consume aggregates. For the articles $A$ published in the $d$ days
+up to and including \code{as\_of}, \code{news\_summary} groups articles by topic, asset
+class and symbol. An article that affects several asset classes or symbols counts in each
+of their groups. For each group $g$ it reports the count, the maximum relevance, and the
+\textbf{relevance-weighted sentiment}
+\[
+  S_g=\frac{\sum_{i\in g} s_i\,r_i}{\sum_{i\in g} r_i},
+\]
+with the denominator replaced by 1 when all relevances are zero (so $S_g=0$). Weighting
+by relevance lets one portfolio-wide story outweigh several minor ones in the same group. The
+summary also lists the ten most relevant headlines. The web app's \emph{News} page shows
+article counts per day and the simple (unweighted) average sentiment per topic over the
+selected filter.
+
+\snippet{news_summary}{Python}{Relevance-weighted aggregation}
+
+\subsection{How the execution agent uses news, and limitations}
+News is a \emph{secondary} input by design. The execution agent starts from equal risk,
+tilts mainly on the statistical evidence, and uses news to confirm, temper or flag risks
+the statistics do not show yet. Because the scores are model judgements:
+\begin{itemize}
+  \item \textbf{They are not reproducible across models}, and only approximately across runs
+        (the local model runs at temperature 0.2). Decisions record the model that made
+        them so runs can be compared.
+  \item \textbf{They are uncalibrated}: a sentiment of $0.6$ has no defined relation to a
+        return. Using them as quantitative signals would first require calibration against
+        subsequent price moves, for example regressing next-day asset returns on $S_g$.
+  \item \textbf{Coverage depends on the sources}: RSS headlines and descriptions are short.
+        Claude's web access gives fuller context than the local setup.
+\end{itemize}
+Possible improvements are an ensemble of scoring models, a lexicon or finance-tuned
+classifier as a reproducible baseline, and a calibration study of $S_g$ against returns.
+
+%==============================================================================
+\section{Web application and job runner}\label{sec:web}
+
+\code{nabia.web} is a FastAPI application with a single-page JavaScript front end (Chart.js).
+\begin{description}
+  \item[Overview] the latest decision, market data coverage, recent jobs.
+  \item[News] filters, counts per day, sentiment by topic, article detail.
+  \item[Executions] budgets over time per run, each decision's rationale and statistics
+        report, and every agent run's tool calls and token usage.
+  \item[Backtests] launch runs with a policy and a decision frequency, then compare them
+        with equal risk (equity, drawdown, metrics, budgets, weights).
+  \item[Jobs] market data downloads, news collection, daily decisions, backtests.
+\end{description}
+Jobs run one at a time in the server's event loop. SQLite allows one writer, and agent runs
+are costly. Their status is stored in the database.
+
+\paragraph{Job logs.} A logging handler stores every record emitted while a job runs under
+that job's id. The job id lives in a \emph{context variable}, which follows the job into its
+asyncio tasks and its \code{asyncio.to\_thread} workers (downloads), so concurrent web
+requests never leak into a job's log. Chatty libraries contribute only warnings and
+errors. The front end tails the log incrementally (\code{GET /api/jobs/\{id\}/logs?after=}).
+
+\snippet{job_log_handler}{Python}{Per-job log capture}
+\snippet{job_run}{Python}{Running a job with its log context}
+
+%==============================================================================
+\section{Verification}\label{sec:verification}
+
+\begin{itemize}
+  \item \textbf{C++} (Catch2): 88 test cases. They check results against closed forms
+        (inverse-volatility weights for uncorrelated assets, Gaussian VaR and ES
+        quantiles, SES and Kalman steady states) and accounting identities to $10^{-15}$.
+        They also check no look-ahead, thread-count independence, and invalid input.
+        The suites run in debug and under AddressSanitizer with UndefinedBehaviorSanitizer,
+        and the multithreaded code under ThreadSanitizer.
+  \item \textbf{Python} (pytest): 37 tests, offline by default:
+        \begin{itemize}
+          \item the analytics, and the three MCP servers in process (including the
+                no-look-ahead check);
+          \item the agent loop over real stdio MCP servers with a scripted model client
+                (parallel calls, tool errors, paused turns, refusals);
+          \item the Ollama translation against a mock transport, RSS parsing;
+          \item the pipeline and the web API, including job logs.
+        \end{itemize}
+        Opt-in tests download live market data and run the execution agent end to end on
+        a local model.
+  \item \textbf{Documents}: this document's code excerpts are extracted from the source at
+        build time and cite their file and lines. A listed function that no longer exists
+        stops the build instead of leaving a stale excerpt.
+\end{itemize}
+
+\end{document}

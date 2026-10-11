@@ -67,6 +67,13 @@ behind a common `IOptimizer<T, R>` interface.
 ### Statistics — `stats/`
 Descriptive statistics, autocorrelation, and normal density, CDF and quantile.
 
+## Python and AI agents — `python/`
+pandas interface to the C++ engine (`nabia.backtest`, `nabia.latest_weights`).
+A market data downloader for equity indices, bond futures, commodities and crypto,
+stored in SQLite (PostgreSQL-ready). Three Claude agents (news analyzer, stats
+analyzer, execution) that set the risk budgets through MCP tools, with a backtest
+mode for their decisions. See `python/README.md`.
+
 ## Applications
 
 - `nabia_rb_backtest` (`apps/rb_backtest/`) — runs a risk budgeting backtest
@@ -110,6 +117,14 @@ echo "command script import $PWD/tools/lldb/eigen_lldb.py" >> ~/.lldbinit
 `doc/` holds LaTeX notes on the theory, proofs and implementation of the
 algorithms. Its subfolders mirror the library (`doc/forecast/`,
 `doc/optimization/convex/`, ...) and share a style file in `doc/common/`.
+
+[`docs/nabia_methodology.pdf`](docs/nabia_methodology.pdf) is the project-wide
+document. It covers the architecture and the methodology of every component:
+the C++ engine, market data, the AI agents with news sentiment and relevance,
+and the web app. Its source is `doc/project/nabia_methodology.tex`. The code
+excerpts in it are extracted from the source at build time by
+`doc/project/extract_snippets.py`, so they always match the current code
+(`--target nabia_doc_nabia_methodology`).
 
 The PDFs are built with the library whenever `pdflatex` is installed (a TeX
 distribution such as TeX Live or MacTeX); turn them off with

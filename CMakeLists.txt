@@ -17,6 +17,7 @@ project(nabia
 option(NABIA_BUILD_TESTS    "Build unit tests"  ${PROJECT_IS_TOP_LEVEL})
 option(NABIA_BUILD_EXAMPLES "Build examples"    ${PROJECT_IS_TOP_LEVEL})
 option(NABIA_BUILD_APPS     "Build command-line applications" ${PROJECT_IS_TOP_LEVEL})
+option(NABIA_BUILD_PYTHON   "Build the Python extension module (needs Python and pybind11)" OFF)
 option(NABIA_BUILD_DOCS     "Build PDF documentation (needs pdflatex)" ${PROJECT_IS_TOP_LEVEL})
 option(NABIA_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 
@@ -146,8 +147,13 @@ if(NABIA_BUILD_TESTS)
 endif()
 
 # Before tests/, which adds the application unit tests when the apps are built.
-if(NABIA_BUILD_APPS)
+# The Python module reuses the application's configuration parser.
+if(NABIA_BUILD_APPS OR NABIA_BUILD_PYTHON)
     add_subdirectory(apps)
+endif()
+
+if(NABIA_BUILD_PYTHON)
+    add_subdirectory(python)
 endif()
 
 if(NABIA_BUILD_TESTS)
