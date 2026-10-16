@@ -71,8 +71,47 @@ Descriptive statistics, autocorrelation, and normal density, CDF and quantile.
 pandas interface to the C++ engine (`nabia.backtest`, `nabia.latest_weights`).
 A market data downloader for equity indices, bond futures, commodities and crypto,
 stored in SQLite (PostgreSQL-ready). Three Claude agents (news analyzer, stats
-analyzer, execution) that set the risk budgets through MCP tools, with a backtest
-mode for their decisions. See `python/README.md`.
+analyzer, execution) that set the risk budgets through MCP tools, on Claude or a
+local Ollama model, with a backtest mode for their decisions. A web app manages
+it all. See `python/README.md`.
+
+### Running the web app
+
+Run these from the repository root. The settings are in `ai_config.json`: the
+database (`sqlite:///market.db`), the symbols, the portfolio parameters and the
+model provider.
+
+1. **Install** (once). This also builds the C++ extension, so it needs CMake
+   and a C++20 compiler.
+   ```sh
+   python3 -m venv python/.venv
+   python/.venv/bin/pip install "./python[marketdata,ai,web,test]"
+   ```
+2. **Start the model.**
+   - Local model (`"provider": "ollama"`): pull the model once with
+     `ollama pull qwen3.8:latest`, then keep `ollama serve` running (or the
+     Ollama app).
+   - Claude (`"provider": "anthropic"`): set `ANTHROPIC_API_KEY` instead. Usage
+     is billed.
+   - The trend rule policy needs neither.
+3. **Start the web app.**
+   ```sh
+   PYTHONPATH=python python/.venv/bin/python -m nabia.web --config ai_config.json
+   ```
+   Then open http://127.0.0.1:8000. Add `--port <n>` to use another port, or
+   `--host 0.0.0.0` to expose it on the network (it has no authentication).
+4. **First run, from the Jobs tab:**
+   1. download market data;
+   2. collect news;
+   3. run a daily decision;
+
+   or start a backtest from the Backtests tab. Click a job to follow its live
+   log.
+
+You don't start the MCP servers (`nabia.ai.servers.news`, `.stats`,
+`.portfolio`) yourself. Each agent run launches the ones it needs as
+subprocesses and stops them at the end. If port 8000 is already in use, stop the
+old server with `lsof -ti :8000 | xargs kill`.
 
 ## Applications
 

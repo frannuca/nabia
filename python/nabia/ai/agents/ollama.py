@@ -10,6 +10,11 @@ responses, and translates them to Ollama's native chat API (``/api/chat``):
 - the reply's ``tool_calls`` come back as ``tool_use`` blocks, with
   ``stop_reason`` "tool_use", "end_turn" or "max_tokens".
 
+``beta.messages.stream(...)`` streams the reply like the Anthropic SDK's
+stream helper: iterating it yields ``content_block_delta`` events (text and
+thinking deltas) as the model writes, and ``get_final_message()`` returns the
+complete response.
+
 Claude-specific options (adaptive thinking, effort, prompt caching, refusal
 fallbacks) have no Ollama equivalent and are ignored. Anthropic-hosted tools
 (web search / fetch) cannot run locally and are dropped; the news agent uses
@@ -20,6 +25,7 @@ from __future__ import annotations
 
 import itertools
 import json
+from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Any
 
@@ -36,6 +42,53 @@ class _Messages:
 
     async def create(self, **kwargs: Any) -> SimpleNamespace:
         return await self._owner.create(**kwargs)
+
+    def stream(self, **kwargs: Any) -> _Stream:
+        return _Stream(self._owner, kwargs)
+
+
+class _Stream:
+    """A streamed reply: an async context manager and iterator of delta events."""
+
+    def __init__(self, owner: OllamaClient, kwargs: dict[str, Any]) -> None:
+        self._owner = owner
+        self._kwargs = kwargs
+        self._final: SimpleNamespace | None = None
+
+    async def __aenter__(self) -> _Stream:
+        return self
+
+    async def __aexit__(self, *exc: Any) -> None:
+        return None
+
+    async def __aiter__(self) -> AsyncIterator[SimpleNamespace]:
+        data: dict[str, Any] = {}
+        async for chunk in self._owner._chat(self._kwargs, stream=True):
+            message = chunk.get("message") or {}
+            for kind, key in (("thinking", "thinking"), ("text", "content")):
+                if message.get(key):
+                    yield SimpleNamespace(type="content_block_delta",
+                                          delta=SimpleNamespace(type=f"{kind}_delta", **{kind: message[key]}))
+            _merge(data, chunk)
+        self._final = self._owner._response(data)
+
+    async def get_final_message(self) -> SimpleNamespace:
+        if self._final is None:
+            async for _ in self:
+                pass
+        assert self._final is not None
+        return self._final
+
+
+def _merge(data: dict[str, Any], chunk: dict[str, Any]) -> None:
+    """Accumulates one streamed chunk: message text and tool calls append, the rest is replaced."""
+    message = data.setdefault("message", {"role": "assistant", "content": "", "thinking": ""})
+    piece = chunk.get("message") or {}
+    message["content"] += piece.get("content") or ""
+    message["thinking"] += piece.get("thinking") or ""
+    if piece.get("tool_calls"):
+        message.setdefault("tool_calls", []).extend(piece["tool_calls"])
+    data.update({k: v for k, v in chunk.items() if k != "message"})
 
 
 class OllamaClient:
@@ -100,22 +153,32 @@ class OllamaClient:
         return out
 
     # --- call --------------------------------------------------------------------------
-    async def create(self, *, model: str | None = None, max_tokens: int = 16_000, system: Any = None,
-                     messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None,
-                     **_ignored: Any) -> SimpleNamespace:
+    async def create(self, **kwargs: Any) -> SimpleNamespace:
+        data: dict[str, Any] = {}
+        async for chunk in self._chat(kwargs, stream=False):
+            _merge(data, chunk)
+        return self._response(data)
+
+    async def _chat(self, kwargs: dict[str, Any], stream: bool) -> AsyncIterator[dict[str, Any]]:
+        """Posts one chat request; yields the reply, or its chunks as they arrive (one JSON object per line)."""
         body = {
             "model": self.model,
-            "messages": self._messages(system, messages),
-            "tools": self._tools(tools or []),
-            "stream": False,
+            "messages": self._messages(kwargs.get("system"), kwargs["messages"]),
+            "tools": self._tools(kwargs.get("tools") or []),
+            "stream": stream,
             "think": self.think,
-            "options": {"num_predict": max_tokens, **self.options},
+            "options": {"num_predict": kwargs.get("max_tokens", 16_000), **self.options},
         }
         async with httpx.AsyncClient(base_url=self.host, timeout=self.timeout, transport=self.transport) as http:
-            response = await http.post("/api/chat", json=body)
-        if response.status_code != 200:
-            raise RuntimeError(f"Ollama {response.status_code}: {response.text[:500]}")
-        return self._response(response.json())
+            async with http.stream("POST", "/api/chat", json=body) as response:
+                if response.status_code != 200:
+                    raise RuntimeError(f"Ollama {response.status_code}: {(await response.aread()).decode()[:500]}")
+                async for line in response.aiter_lines():
+                    if line.strip():
+                        chunk = json.loads(line)
+                        if chunk.get("error"):
+                            raise RuntimeError(f"Ollama: {chunk['error']}")
+                        yield chunk
 
     def _response(self, data: dict[str, Any]) -> SimpleNamespace:
         message = data.get("message", {})

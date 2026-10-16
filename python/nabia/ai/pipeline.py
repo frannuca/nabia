@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import logging
 from collections.abc import Awaitable, Callable
@@ -66,12 +67,15 @@ def trend_rule_decider(config: AIConfig, run: str, strength: float = 0.5) -> Dec
     market = MarketDataStore(config.db_url)
     store = AgentStore(config.db_url)
 
-    async def decide(as_of: dt.date) -> None:
+    def decide_now(as_of: dt.date) -> None:
         prices = market.load_prices(config.symbols, start=as_of - dt.timedelta(days=config.stats_history_days),
                                     end=as_of)
         budgets = analytics.trend_tilted_budgets(prices, strength, config.min_budget, config.max_budget)
         log.info("trend rule %s: %s", as_of, ", ".join(f"{s} {b:.0%}" for s, b in budgets.items()))
         store.save_decision(run, as_of, budgets, f"trend rule (strength {strength})", decided_by="trend_rule")
+
+    async def decide(as_of: dt.date) -> None:
+        await asyncio.to_thread(decide_now, as_of)  # off the event loop: the web app stays responsive
 
     return decide
 
@@ -159,7 +163,7 @@ async def run_backtest(config: AIConfig, start: dt.date, end: dt.date, run: str,
             raise RuntimeError(f"no risk budgets were stored for {as_of}")
 
     log.info("backtest %s: %d decision dates; running the portfolio backtest", run, len(dates))
-    bt = evaluate_decisions(config, run, start, end, prices)
+    bt = await asyncio.to_thread(evaluate_decisions, config, run, start, end, prices)
     log.info("backtest %s: Sharpe %.2f (equal risk %.2f), max drawdown %.1f%%", run, bt.result.metrics["sharpe_ratio"],
              bt.baseline.metrics["sharpe_ratio"], 100 * bt.result.metrics["max_drawdown"])
     store.save_backtest_run(run, policy, start, end, frequency,

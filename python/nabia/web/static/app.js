@@ -236,7 +236,9 @@ async function openJobLog(jobId) {
     if (data.logs.length) {
       const empty = view.querySelector(".log-empty");
       if (empty) empty.remove();
-      view.insertAdjacentHTML("beforeend", data.logs.map((l) => `<div class="log-line ${esc(l.level.toLowerCase())}">`
+      // Streamed model output (logger nabia.ai.agents.model) gets its own style: thinking vs written text.
+      const kind = (l) => l.logger.endsWith(".model") ? (/^\S+ thinking:/.test(l.message) ? " model thinking" : " model") : "";
+      view.insertAdjacentHTML("beforeend", data.logs.map((l) => `<div class="log-line ${esc(l.level.toLowerCase())}${kind(l)}">`
         + `<span class="log-ts">${esc(l.ts.slice(11))}</span><span class="log-src">${esc(l.logger.split(".").pop())}</span>`
         + `<span class="log-msg">${esc(l.message)}</span></div>`).join(""));
       after = data.logs[data.logs.length - 1].id;
@@ -244,7 +246,7 @@ async function openJobLog(jobId) {
     }
     const active = j.status === "running" || j.status === "queued";
     if (!active && data.logs.length < 1000) return;  // finished and fully loaded
-    await new Promise((r) => setTimeout(r, active ? 1500 : 0));
+    await new Promise((r) => setTimeout(r, active ? 1000 : 0));
   }
 }
 

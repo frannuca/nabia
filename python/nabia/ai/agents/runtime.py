@@ -25,6 +25,8 @@ from mcp.client.stdio import get_default_environment, stdio_client
 from ..config import AIConfig
 
 log = logging.getLogger(__name__)
+#: The model's output as it streams (its own logger, so the job log shows it as "model").
+model_log = logging.getLogger("nabia.ai.agents.model")
 
 MAX_TOKENS = 16_000
 
@@ -67,6 +69,46 @@ class AgentRun:
     server_tool_calls: int = 0
     turns: int = 0
     usage: dict[str, int] = field(default_factory=dict)
+
+
+class LiveOutput:
+    """Logs a streamed reply while it is written: a line per paragraph, or every
+    few seconds / few hundred characters for long lines, so a job log follows
+    the model as it thinks and writes."""
+
+    def __init__(self, agent: str, max_chars: int = 400, max_seconds: float = 3.0) -> None:
+        self.agent = agent
+        self.max_chars = max_chars
+        self.max_seconds = max_seconds
+        self.kind = ""
+        self.buffer = ""
+        self.last = time.monotonic()
+        self.chars = 0
+
+    def add(self, kind: str, text: str) -> None:
+        if kind != self.kind:
+            self.flush()
+            self.kind = kind
+        self.buffer += text
+        self.chars += len(text)
+        while "\n" in self.buffer:
+            line, self.buffer = self.buffer.split("\n", 1)
+            self._emit(line)
+        slow = len(self.buffer) >= self.max_chars // 5 and time.monotonic() - self.last >= self.max_seconds
+        if len(self.buffer) >= self.max_chars or slow:  # long lines in pieces; slow streams every few seconds
+            self._emit(self.buffer)
+            self.buffer = ""
+
+    def flush(self) -> None:
+        if self.buffer:
+            self._emit(self.buffer)
+        self.buffer = ""
+
+    def _emit(self, text: str) -> None:
+        self.last = time.monotonic()
+        if text.strip():
+            label = "thinking" if self.kind == "thinking" else "writes"
+            model_log.info("%s %s: %s", self.agent, label, text.strip())
 
 
 class AgentRefusedError(RuntimeError):
@@ -153,7 +195,8 @@ class AgentRuntime:
         for turn in range(1, self.max_turns + 1):
             log.info("%s: turn %d, waiting for the model…", record.agent, turn)
             started = time.monotonic()
-            response = await self.client.beta.messages.create(
+            live = LiveOutput(record.agent)
+            response = await self._create(live, dict(
                 model=self.config.model,
                 max_tokens=MAX_TOKENS,
                 system=system,
@@ -164,15 +207,15 @@ class AgentRuntime:
                 cache_control={"type": "ephemeral"},  # caches the stable prefix: tools, system, history
                 betas=["server-side-fallback-2026-07-01"],
                 fallbacks="default",  # re-run a refused request on a fallback model
-            )
+            ))
             record.turns += 1
             self._add_usage(record, response.usage)
             log.info("%s: turn %d -> %s (%s in / %s out tokens, %.1fs)", record.agent, turn, response.stop_reason,
                      getattr(response.usage, "input_tokens", "?"), getattr(response.usage, "output_tokens", "?"),
                      time.monotonic() - started)
             for block in response.content:
-                if block.type == "text" and block.text.strip() and response.stop_reason == "tool_use":
-                    log.info("%s says: %s", record.agent, _preview(block.text, 300))
+                if block.type == "text" and block.text.strip() and not live.chars and response.stop_reason == "tool_use":
+                    log.info("%s says: %s", record.agent, _preview(block.text, 300))  # not streamed
                 elif block.type == "server_tool_use":
                     log.info("%s -> %s %s", record.agent, block.name, _preview(getattr(block, "input", {})))
             if response.stop_reason == "refusal":
@@ -193,6 +236,24 @@ class AgentRuntime:
             results = await asyncio.gather(*(self._call_tool(record, sessions, b) for b in calls))
             messages.append({"role": "user", "content": list(results)})  # all results in one message
         raise RuntimeError(f"{record.agent}: no final answer after {self.max_turns} turns")
+
+    async def _create(self, live: LiveOutput, request: dict[str, Any]) -> Any:
+        """One model turn, streamed when the client supports it, so the output is
+        logged as it is written; clients with only ``create`` (tests) are awaited whole."""
+        messages_api = self.client.beta.messages
+        if not hasattr(messages_api, "stream"):
+            return await messages_api.create(**request)
+        async with messages_api.stream(**request) as stream:
+            async for event in stream:
+                if event.type == "content_block_delta":
+                    delta = event.delta
+                    if delta.type == "text_delta":
+                        live.add("text", delta.text)
+                    elif delta.type == "thinking_delta":
+                        live.add("thinking", delta.thinking)
+            response = await stream.get_final_message()
+        live.flush()
+        return response
 
     async def _call_tool(self, record: AgentRun, sessions: dict[str, ClientSession], block: Any) -> dict[str, Any]:
         session = sessions.get(block.name)

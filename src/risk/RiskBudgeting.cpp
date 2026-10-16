@@ -29,8 +29,8 @@ VectorXd normalized_budgets(const RiskBudgetingParams& params, Eigen::Index n) {
     return params.budgets / params.budgets.sum();
 }
 
-/// Default start: y_i proportional to b_i / sigma_i (exact for uncorrelated
-/// assets under volatility).
+/// Default start: y_i proportional to b_i / sigma_i (inverse volatility for
+/// equal budgets, which is exact for uncorrelated assets under volatility).
 VectorXd default_start(const IRiskMeasure& measure, const VectorXd& b) {
     const VectorXd sigma = measure.covariance_matrix().diagonal().cwiseSqrt();
     VectorXd y(b.size());

@@ -49,21 +49,25 @@ class AIConfig:
     portfolio: dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_PORTFOLIO))
     """nabia.backtest parameters (without budgets, which the execution agent sets)."""
     min_budget: float = 0.02
+    """Lower bound on each normalized risk budget, enforced by set_risk_budgets."""
     max_budget: float = 0.40
-    """Bounds on each normalized risk budget, enforced by set_risk_budgets."""
+    """Upper bound on each normalized risk budget, enforced by set_risk_budgets."""
     provider: str = "anthropic"
     """Model provider: "anthropic" (Claude API) or "ollama" (a local model)."""
     model: str = "claude-opus-5-5"
     """Claude model, when provider is "anthropic"."""
     effort: dict[str, str] = field(default_factory=lambda: {"news": "medium", "stats": "high", "execution": "high"})
+    """Claude effort level per agent (news, stats, execution)."""
     ollama_model: str = "qwen3.8:latest"
     """Local model, when provider is "ollama" (it must support tool calling: `ollama show <model>`)."""
     ollama_host: str = "http://localhost:11434"
+    """URL of the Ollama server."""
     ollama_options: dict[str, Any] = field(default_factory=lambda: {"temperature": 0.2, "num_ctx": 32768})
     """Ollama model options; num_ctx must hold the prompts, tool schemas and tool results."""
     ollama_think: bool = False
     """Let thinking models reason before answering (slower, sometimes better tool use)."""
     news_feeds: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_NEWS_FEEDS))
+    """RSS / Atom feeds read by fetch_news_feeds, by source name."""
     news_max_searches: int = 10
     """Cap on web searches per news collection run."""
     news_lookback_days: int = 7

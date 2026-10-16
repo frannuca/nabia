@@ -128,3 +128,64 @@ def test_execution_agent_on_the_local_model(tmp_path):  # pragma: no cover - nee
     assert decision is not None, run.final_text
     assert decision["decided_by"] == f"agent:ollama:{cfg.ollama_model}"
     assert decision["weights"] is not None and sum(decision["budgets"].values()) == pytest.approx(1.0)
+
+
+def test_streamed_replies_yield_deltas_and_the_full_message():
+    chunks = [
+        {"model": "m", "message": {"role": "assistant", "content": "", "thinking": "Trends are "}, "done": False},
+        {"model": "m", "message": {"role": "assistant", "content": "", "thinking": "strong."}, "done": False},
+        {"model": "m", "message": {"role": "assistant", "content": "Setting "}, "done": False},
+        {"model": "m", "message": {"role": "assistant", "content": "budgets.", "tool_calls": [
+            {"function": {"name": "set_risk_budgets", "arguments": {"budgets": {"A": 1}}}}]}, "done": False},
+        {"model": "m", "message": {"role": "assistant", "content": ""}, "done": True, "done_reason": "stop",
+         "prompt_eval_count": 50, "eval_count": 12},
+    ]
+    sent = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, content="\n".join(json.dumps(c) for c in chunks).encode())
+
+    client = OllamaClient("qwen3.8:latest", think=True, transport=httpx.MockTransport(handler))
+
+    async def consume():
+        deltas = []
+        async with client.beta.messages.stream(system="s", messages=[{"role": "user", "content": "go"}], tools=[]) as stream:
+            async for event in stream:
+                deltas.append((event.delta.type, getattr(event.delta, "text", None) or event.delta.thinking))
+            return deltas, await stream.get_final_message()
+
+    deltas, final = asyncio.run(consume())
+    assert sent[0]["stream"] is True
+    assert deltas == [("thinking_delta", "Trends are "), ("thinking_delta", "strong."),
+                      ("text_delta", "Setting "), ("text_delta", "budgets.")]
+    assert final.stop_reason == "tool_use" and final.content[0].text == "Setting budgets."
+    assert final.content[1].name == "set_risk_budgets" and final.content[1].input == {"budgets": {"A": 1}}
+    assert final.usage.input_tokens == 50 and final.usage.output_tokens == 12
+
+    def failing(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b'{"error": "model not found"}')
+
+    broken = OllamaClient("nope", transport=httpx.MockTransport(failing))
+    with pytest.raises(RuntimeError, match="model not found"):
+        asyncio.run(broken.beta.messages.create(messages=[{"role": "user", "content": "go"}]))
+
+
+def test_live_output_logs_lines_as_they_stream(caplog):
+    import logging
+
+    from nabia.ai.agents.runtime import LiveOutput
+
+    caplog.set_level(logging.INFO, logger="nabia.ai.agents.model")
+    live = LiveOutput("execution", max_chars=20, max_seconds=60)
+    for piece in ["Equity trends ", "look strong.\nBonds", " are weak"]:
+        live.add("thinking", piece)
+    live.add("text", "Raising ")
+    live.add("text", "the Nikkei.")
+    live.flush()
+    assert [r.getMessage() for r in caplog.records] == [
+        "execution thinking: Equity trends look strong.",
+        "execution thinking: Bonds are weak",  # flushed when the kind changes
+        "execution writes: Raising the Nikkei.",
+    ]
+    assert live.chars == len("Equity trends look strong.\nBonds are weak") + len("Raising the Nikkei.")
