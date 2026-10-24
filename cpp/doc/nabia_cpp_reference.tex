@@ -1327,14 +1327,38 @@ CIBW_BUILD="cp312-*" CIBW_ARCHS=aarch64 \
     pipx run cibuildwheel==4.3.4 --platform linux cpp   # a single wheel
 pipx run cibuildwheel==4.3.4 --platform linux --print-build-identifiers cpp
 \end{lstlisting}
-In CI, \code{.github/workflows/wheels.yml} runs cibuildwheel on GitHub runners: Ubuntu x86\_64 and
-arm64, macOS 14 for arm64 and cross-compiled x86\_64, and Windows. It runs on demand, on
-\code{v*} tags, and on pull requests that change \code{cpp/} or the bridge tests. The wheels are
-uploaded as build artifacts:
-\begin{lstlisting}[language=bash]
-gh workflow run wheels.yml                # start a build
-gh run download --pattern 'wheels-*' -D wheelhouse   # fetch the wheels of the latest run
+\paragraph{Windows.} MSVC only runs on Windows, so Windows wheels are built there (or in CI).
+\code{cpp/scripts/build\_wheels.ps1} is the PowerShell counterpart of \code{build\_wheels.sh}: it
+checks for the Visual Studio C++ tools (with \code{vswhere}), Git and Python, installs cibuildwheel
+in its own virtual environment and runs it on \code{cpp} from the repository root, so every wheel is
+tested with \code{python/tests/bridge}. The wheels go to \code{dist}, where the PowerShell versions of
+the setup scripts (\code{python/scripts/setup\_env.ps1}, \code{webui/scripts/setup\_env.ps1}) install
+them from:
+\begin{lstlisting}
+cpp\scripts\build_wheels.ps1                      # win_amd64, CPython 3.10-3.14, each tested
+cpp\scripts\build_wheels.ps1 -Versions 3.12,3.13  # only these versions
+cpp\scripts\build_wheels.ps1 -Arch ARM64          # Windows on ARM, on an ARM machine
+python\scripts\setup_env.ps1                      # python\.venv with the wheel and nabia
 \end{lstlisting}
+
+\paragraph{Every platform in GitHub Actions.} \code{.github/workflows/wheels.yml} runs on demand,
+on \code{v*} tags, and on pull requests that change \code{cpp/} or the bridge tests. Its jobs:
+\begin{itemize}
+  \item \code{wheels}: cibuildwheel on Ubuntu x86\_64 and arm64, macOS 14 for arm64 and
+        cross-compiled x86\_64, and Windows AMD64; one artifact per platform,
+        \code{wheels-<os>-<arch>};
+  \item \code{collect}: every wheel and the sdist in one artifact, \code{all-wheels};
+  \item \code{release}: on a \code{v*} tag, a GitHub Release with all of them attached;
+  \item \code{windows-script}: runs \code{build\_wheels.ps1} and \code{setup\_env.ps1} on Windows,
+        then the Python project's tests, so the PowerShell scripts are tested too.
+\end{itemize}
+\begin{lstlisting}[language=bash]
+gh workflow run wheels.yml                       # start a build
+gh run download <run-id> -n all-wheels -D dist   # every wheel and the sdist
+git tag v0.1.0 && git push origin v0.1.0         # build and publish a GitHub Release
+\end{lstlisting}
+On the repository page, the artifacts are at the bottom of the run's summary (Actions tab, workflow
+\emph{wheels}). They need a GitHub login and are kept for 90 days; releases are permanent.
 
 \paragraph{Installing and using a wheel.} The Python projects install it with the script
 \code{setup\_env.sh} in their \code{scripts} folder. By hand, pip picks the file matching the
@@ -1352,9 +1376,9 @@ python -c "import nabia_python_bridge as nb; print(nb.stats.mean([1.0, 2.0, 3.0]
         \code{cpp/} builds anywhere with a C++20 compiler (build folders are excluded).
   \item \textbf{No stable ABI.} pybind11 modules use the full CPython API, so there is no
         \code{abi3} wheel and each new Python version needs its own build.
-  \item \textbf{Verified so far:} the macOS arm64 wheels, built and tested locally. The Linux,
-        Intel macOS and Windows wheels are configured in cibuildwheel and CI but have not been
-        built yet. Windows (MSVC) is the most likely to need fixes.
+  \item \textbf{Toolchains.} The macOS runners use Xcode 15, whose libc++ has no
+        \code{std::jthread}; the library uses its own joining thread
+        (\code{src/common/joining\_thread.hpp}) instead.
 \end{itemize}
 
 
@@ -1396,8 +1420,8 @@ python -c "import nabia_python_bridge as nb; print(nb.stats.mean([1.0, 2.0, 3.0]
         \code{qp\_tolerance}. On some strongly convex mean-variance problems it was seen to
         stall at its iteration limit, so prefer the augmented Lagrangian there until the QP
         step is made exact (an active-set QP).
-  \item \textbf{Wheels} are verified on macOS arm64 only; Linux, Intel macOS and Windows are
-        configured in cibuildwheel and CI but not yet built.
+  \item \textbf{Wheels} for Linux, Intel macOS and Windows are built and tested only in CI;
+        locally, on macOS arm64.
 \end{itemize}
 
 \end{document}

@@ -29,6 +29,9 @@ To step into the C++ code from a Python script, build a wheel with debug symbols
 (`NABIA_WHEEL_BUILD_TYPE=RelWithDebInfo ../cpp/scripts/build_wheels.sh 3.14`), run `setup_env.sh`,
 and attach CLion's debugger to the Python process.
 
+On Windows, use the PowerShell scripts: `..\cpp\scripts\build_wheels.ps1 -Versions 3.12`, then
+`scripts\setup_env.ps1` (interpreter: `.venv\Scripts\python.exe`).
+
 ## The C++ library
 
 ```python

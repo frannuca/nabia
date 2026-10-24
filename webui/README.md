@@ -23,6 +23,9 @@ In PyCharm, select `webui/.venv` as the interpreter and keep `webui/` as the wor
 configurations: `ai_config.json` is here, and its database URL (`sqlite:///../data/market.db`, shared
 with `../python`) is relative to it.
 
+On Windows, use the PowerShell scripts: `..\cpp\scripts\build_wheels.ps1 -Versions 3.12`, then
+`scripts\setup_env.ps1` (interpreter: `.venv\Scripts\python.exe`).
+
 ## Running the web app
 
 1. **Start the model.**

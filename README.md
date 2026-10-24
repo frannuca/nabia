@@ -61,6 +61,16 @@ NABIA_WHEEL_BUILD_TYPE=RelWithDebInfo cpp/scripts/build_wheels.sh 3.14   # with 
 
 Rebuild the wheel whenever the C++ code changes, then run steps 3 and 4 again.
 
+On Windows (Intel/AMD 64-bit), in PowerShell, with Visual Studio 2022 Build Tools ("Desktop
+development with C++"), Git and Python from python.org installed:
+
+```powershell
+cpp\scripts\build_wheels.ps1                       # cibuildwheel: CPython 3.10–3.14, each tested -> dist\*-win_amd64.whl
+cpp\scripts\build_wheels.ps1 -Versions 3.12,3.13    # only these versions
+python\scripts\setup_env.ps1                        # then step 3 with python\.venv\Scripts\python.exe
+webui\scripts\setup_env.ps1                         # and step 4 with webui\.venv\Scripts\python.exe
+```
+
 ### 3. Python project — `python/` (PyCharm)
 
 ```sh
@@ -104,12 +114,28 @@ the web app: module `nabia_webui.web`, parameters `--config ai_config.json`, wor
 Without rebuilding the wheel: `cd cpp && cmake --preset python-bridge && cmake --build --preset python-bridge`
 builds the modules next to the package sources; run the script with `PYTHONPATH=<repo>/cpp/bindings`.
 
-## Wheels for other versions and platforms
+## Wheels for every version and platform (GitHub Actions)
 
-`cpp/scripts/build_wheels.sh` builds and tests one wheel per CPython version (3.10–3.14) on the current
-machine. cibuildwheel (configured in `cpp/pyproject.toml`) and the GitHub workflow
-`.github/workflows/wheels.yml` build them for Linux, macOS and Windows. See section 14.5 of the C++
-reference.
+`.github/workflows/wheels.yml` builds and tests the wheels for CPython 3.10–3.14 on Linux (x86_64,
+aarch64), macOS (arm64, x86_64) and Windows (AMD64) with cibuildwheel (configured in
+`cpp/pyproject.toml`):
+
+```sh
+gh workflow run wheels.yml                                  # start a build
+gh run list --workflow wheels.yml                           # follow it
+gh run download <run-id> -n all-wheels -D dist              # every wheel and the sdist, into dist/
+```
+
+On the run's page (Actions tab → wheels → the run), the **Artifacts** section has one zip per platform
+and `all-wheels` with everything. Pushing a version tag also publishes a GitHub Release with all the
+wheels attached:
+
+```sh
+git tag v0.1.0 && git push origin v0.1.0   # -> https://github.com/frannuca/nabia/releases
+```
+
+Locally, `cpp/scripts/build_wheels.sh` (macOS, Linux) and `cpp/scripts/build_wheels.ps1` (Windows)
+build the wheels of the current machine. See section 14.5 of the C++ reference.
 
 ## Documentation
 

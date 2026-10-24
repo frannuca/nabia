@@ -1,6 +1,11 @@
 # Builds and tests nabia_python_bridge wheels for CPython 3.10-3.14 on Linux, macOS and Windows
 # with cibuildwheel (settings in cpp/pyproject.toml), testing each with python/tests/bridge. Runs on
 # demand, on version tags (v*), and on pull requests that touch the C++ project or the bridge tests.
+#
+#   wheels          one job per platform; artifact wheels-<os>-<arch>
+#   collect         every wheel plus the sdist in one artifact, all-wheels
+#   release         on a v* tag: a GitHub Release with all of them attached
+#   windows-script  runs cpp/scripts/build_wheels.ps1 and python/scripts/setup_env.ps1 on Windows
 name: wheels
 
 on:
@@ -8,7 +13,7 @@ on:
   push:
     tags: ["v*"]
   pull_request:
-    paths: ["cpp/**", "python/tests/bridge/**", "python/examples/0*.py", ".github/workflows/wheels.yml"]
+    paths: ["cpp/**", "python/tests/bridge/**", "python/examples/0*.py", "python/scripts/**", ".github/workflows/wheels.yml"]
 
 jobs:
   wheels:
@@ -22,7 +27,7 @@ jobs:
           - { os: ubuntu-24.04-arm, archs: aarch64 }
           - { os: macos-14,         archs: arm64 }
           - { os: macos-14,         archs: x86_64 }   # cross-compiled, tested under Rosetta
-          - { os: windows-latest,   archs: AMD64 }
+          - { os: windows-latest,   archs: AMD64 }    # Windows on Intel/AMD 64-bit (win_amd64)
     steps:
       - uses: actions/checkout@v5
       - uses: pypa/cibuildwheel@v4.3.4
@@ -35,3 +40,61 @@ jobs:
         with:
           name: wheels-${{ matrix.os }}-${{ matrix.archs }}
           path: wheelhouse/*.whl
+
+  collect:
+    name: all wheels and sdist
+    needs: wheels
+    if: ${{ !cancelled() }}   # keep the wheels of the platforms that succeeded
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+      - name: Source distribution
+        run: pipx run build --sdist --outdir dist cpp
+      - name: List
+        run: ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: all-wheels
+          path: dist/*
+
+  release:
+    name: GitHub Release
+    needs: collect
+    if: ${{ startsWith(github.ref, 'refs/tags/v') && needs.collect.result == 'success' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: all-wheels
+          path: dist
+      - name: Create the release with every wheel attached
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "$GITHUB_REF_NAME" dist/*
+          --repo "$GITHUB_REPOSITORY" --title "nabia $GITHUB_REF_NAME" --generate-notes
+
+  windows-script:
+    name: Windows build script
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: cpp/scripts/build_wheels.ps1 (CPython 3.12, tested)
+        shell: pwsh
+        run: cpp/scripts/build_wheels.ps1 -Versions 3.12 -PythonExe python
+      - name: python/scripts/setup_env.ps1 and the Python project's tests
+        shell: pwsh
+        run: |
+          python/scripts/setup_env.ps1 -PythonExe python
+          python/.venv/Scripts/python.exe -m pytest -q python/tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

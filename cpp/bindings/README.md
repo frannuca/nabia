@@ -32,16 +32,22 @@ NABIA_WHEEL_BUILD_TYPE=RelWithDebInfo cpp/scripts/build_wheels.sh 3.14   # with 
 # Current interpreter only
 python/.venv/bin/python -m pip wheel ./cpp --no-deps -w dist
 
+# Windows (PowerShell; Visual Studio 2022 Build Tools, Git, Python): CPython 3.10-3.14, each tested
+cpp\scripts\build_wheels.ps1                              # or: -Versions 3.12,3.13
+
 # Linux / macOS / Windows with cibuildwheel (configured in cpp/pyproject.toml; Linux needs Docker)
 pipx run cibuildwheel==4.3.4 --platform linux cpp
-gh workflow run wheels.yml                                # CI: .github/workflows/wheels.yml
+
+# Every platform in GitHub Actions; all-wheels = every wheel + the sdist; a v* tag makes a Release
+gh workflow run wheels.yml
+gh run download <run-id> -n all-wheels -D dist
 
 # Development build for debugging in CLion: modules written next to the .py files
 cd cpp && cmake --preset python-bridge && cmake --build --preset python-bridge
 PYTHONPATH=cpp/bindings python/.venv/bin/python my_script.py
 ```
 
-The Python projects install the wheel from `dist/` with their `scripts/setup_env.sh`
+The Python projects install the wheel from `dist/` with their `scripts/setup_env.sh` (`setup_env.ps1` on Windows)
 (`pip install --no-index --find-links dist nabia_python_bridge` by hand).
 The tests of the bindings are in the Python project, `python/tests/bridge`; the wheel scripts run them
 on every wheel. Every command is explained in section 14.5 of the C++ reference,
