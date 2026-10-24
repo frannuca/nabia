@@ -135,7 +135,9 @@ git tag v0.1.0 && git push origin v0.1.0   # -> https://github.com/frannuca/nabi
 ```
 
 Locally, `cpp/scripts/build_wheels.sh` (macOS, Linux) and `cpp/scripts/build_wheels.ps1` (Windows)
-build the wheels of the current machine. See section 14.5 of the C++ reference.
+build the wheels of the current machine. See section 14.5 of the C++ reference, and the tutorial
+[`cpp/doc/packaging/wheels_and_github_actions.pdf`](cpp/doc/packaging/wheels_and_github_actions.pdf)
+for how wheels, cibuildwheel and the workflow's jobs work and how to write your own.
 
 ## Documentation
 

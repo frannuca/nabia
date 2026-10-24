@@ -159,6 +159,10 @@ echo "command script import $PWD/tools/lldb/eigen_lldb.py" >> ~/.lldbinit
   covers the architecture and every method of the library, stated mathematically, the command-line
   application, the bindings and the wheels. Its code excerpts are extracted from the source at build
   time by `doc/extract_snippets.py`, so they always match the current code.
+- [`doc/packaging/wheels_and_github_actions.pdf`](doc/packaging/wheels_and_github_actions.pdf): a tutorial
+  on wheels, cibuildwheel and GitHub Actions, built on this project's own `pyproject.toml`, scripts and
+  workflow: what a wheel is and how pip picks one, how it is built and tested, how the workflow's jobs
+  work, how to write new ones, and how to debug and release.
 - Theory notes, in subfolders that mirror the library: `doc/forecast/` (exponential smoothing, Kalman
   filter, Gaussian processes), `doc/optimization/convex/`, `doc/regression/` (elastic net). They share
   the style file in `doc/common/`.

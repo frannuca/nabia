@@ -49,7 +49,9 @@ function(nabia_add_latex_doc tex)
             ${PROJECT_SOURCE_DIR}/include/*.h ${PROJECT_SOURCE_DIR}/src/*.cpp ${PROJECT_SOURCE_DIR}/src/*.hpp
             ${PROJECT_SOURCE_DIR}/apps/*.cpp ${PROJECT_SOURCE_DIR}/apps/*.hpp
             ${PROJECT_SOURCE_DIR}/bindings/src/*.cpp ${PROJECT_SOURCE_DIR}/bindings/src/*.hpp
-            ${PROJECT_SOURCE_DIR}/bindings/nabia_python_bridge/*.py)
+            ${PROJECT_SOURCE_DIR}/bindings/nabia_python_bridge/*.py ${PROJECT_SOURCE_DIR}/bindings/CMakeLists.txt
+            ${PROJECT_SOURCE_DIR}/pyproject.toml ${PROJECT_SOURCE_DIR}/scripts/*
+            ${PROJECT_SOURCE_DIR}/../.github/workflows/*.yml ${PROJECT_SOURCE_DIR}/../python/scripts/*)
         list(APPEND extra_depends ${CMAKE_CURRENT_SOURCE_DIR}/${ARG_SNIPPETS})
     endif()
     # TEXINPUTS: the shared style in doc/common (and the snippets), then the default path (trailing ':').
@@ -78,6 +80,9 @@ nabia_add_latex_doc(forecast/kalman_filter.tex)
 nabia_add_latex_doc(forecast/gaussian_process.tex)
 nabia_add_latex_doc(optimization/convex/convex_optimization.tex)
 nabia_add_latex_doc(regression/elastic_net_regression.tex)
+
+# Tutorial: wheels, cibuildwheel and GitHub Actions (shows the real workflow and pyproject.toml).
+nabia_add_latex_doc(packaging/wheels_and_github_actions.tex SNIPPETS packaging/extract_files.py)
 
 # Reference of the C++ project: architecture, methods and code (excerpts extracted from the sources).
 nabia_add_latex_doc(nabia_cpp_reference.tex SNIPPETS extract_snippets.py)
