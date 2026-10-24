@@ -1,7 +1,7 @@
 """End to end: download market data into SQLite, backtest a risk budgeting
 portfolio on it and print the weights to hold now.
 
-    PYTHONPATH=python python python/examples/risk_budgeting_from_market_data.py --db sqlite:///market.db
+    .venv/bin/python examples/risk_budgeting_from_market_data.py --db sqlite:///../data/market.db
 """
 
 from __future__ import annotations

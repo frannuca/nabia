@@ -1,188 +1,128 @@
 # nabia
 
-A C++20 numerical library for researching and running **systematic trend strategies**.
+A platform for researching and running **systematic trend strategies** across equity indices, bond
+futures, commodities and crypto: a C++20 numerical library, a Python package on top of it, and a web
+application with AI agents that decide the risk budgets.
 
-A trend strategy has four stages: it extracts a trend from noisy prices, forecasts
-where that trend is heading and how uncertain the forecast is, turns those views
-into positions sized by risk, and calibrates its own parameters. nabia provides
-the numerical building blocks for each stage, built on Eigen.
+The repository holds three independent projects. Each opens on its own in an IDE, has its own
+environment, tests and documentation (`doc/`, LaTeX sources with their PDFs), and depends on the
+others only through installed packages:
 
-## Contents
+| Project | Open in | Contents | Documentation |
+|---|---|---|---|
+| [`cpp/`](cpp/README.md) | CLion | The C++ library (`include`, `src`), Catch2 tests, the command-line backtest, and the pybind11 bindings that build the `nabia_python_bridge` wheel | [`cpp/doc/nabia_cpp_reference.pdf`](cpp/doc/nabia_cpp_reference.pdf) and theory notes in `cpp/doc/` |
+| [`python/`](python/README.md) | PyCharm | The `nabia` package (backtests, analytics, market data) on the wheel, examples with plots, and the bindings' tests | [`python/doc/nabia_python_reference.pdf`](python/doc/nabia_python_reference.pdf) |
+| [`webui/`](webui/README.md) | PyCharm | `nabia_webui`: the agents, their MCP servers, and the web app (FastAPI back end, JavaScript front end), on the `nabia` package | [`webui/doc/nabia_webui_reference.pdf`](webui/doc/nabia_webui_reference.pdf) |
 
-### Signal extraction — `signal/`
-Causal filters (output at time t uses only data up to t, so they can run live)
-behind a common `IFilter<T>` interface. Each supports streaming (`process`) and batch (`apply`) use.
-- `EWMA` — exponentially weighted moving average, the classic trend filter.
-- `ButterworthBandPass` — isolates trend cycles within a chosen frequency band
-  (removes the level and the high-frequency noise).
-- `moving_average`, `exponential_moving_average`, `diff`.
+```
+cpp/  ──builds──▶  dist/nabia_python_bridge-*.whl  ──installed by──▶  python/.venv
+                                                    ──installed by──▶  webui/.venv  (+ python/ editable)
+data/market.db   shared market database (python/ and webui/)
+```
 
-### Trend forecasting — `forecast/`
-Models behind a common `IForecaster<T>` interface: `fit(series)`,
-`forecast(horizon)` returning a mean and variance for each step ahead, and prediction intervals.
-- `KalmanFilter` — linear Gaussian state-space models. Includes local-level and
-  local-linear-trend models for the trend and its slope, missing data, a smoother
-  and the likelihood.
-- `GaussianProcess` — non-parametric trend and seasonality, with
-  squared-exponential, Matérn 5/2, periodic, sum and product kernels and
-  maximum-likelihood hyperparameters.
-- `SimpleExponentialSmoothing` — level-only baseline.
+## Build and run
 
-### Risk and allocation — `risk/`
-Gaussian risk measures with per-asset risk contributions, used to size and combine positions.
-- `Volatility`, `ValueAtRisk`, `ExpectedShortfall`.
-- `RiskBudgeting<Measure>` — long-only weights whose risk contributions match
-  given budgets (equal risk contribution by default), for any of the measures above.
+Commands run from the repository root unless a step says `cd`. The order matters: each project installs
+what the previous one builds.
 
-### Portfolio construction and backtesting — `strategy/`
-- `RiskBudgetingPortfolio` — walk-forward backtest of a long-only risk-budgeting
-  portfolio built from a `DataFrame` of asset returns. Settings: the trailing
-  covariance window (sample or exponentially weighted), the rebalance frequency
-  (every k points), the risk measure and budgets, optional volatility targeting
-  with a leverage cap, and proportional transaction costs. Weights drift
-  between trades. The risk budgeting problems of all rebalance dates are
-  solved in parallel (`num_threads`), with results identical for every thread count.
-- Results keep the input time index: weights held each period, target weights
-  and risk contributions at each rebalance, gross and net returns, costs,
-  turnover, equity, PnL and drawdown.
-- `PerformanceMetrics` — total and annualized return, volatility, Sharpe,
-  Sortino, maximum drawdown and its duration, Calmar, hit rate, turnover and costs.
+### 1. C++ project — `cpp/` (CLion)
 
-### Time series containers — `dataframe/`
-`TimeSeries<Index>` and `DataFrame<Index>`: Eigen vectors and matrices with a
-strictly increasing time index. The index can be dates (`Date`), timestamps
-(`Timestamp`), integers (`Step`) or any ordered type. Supports column access by
-name, lookup and slicing by time, column selection, dropping rows with missing
-values (to align series), and simple and log returns.
-
-### Optimization — `optimization/`
-Solvers for portfolio construction and for calibrating strategy parameters,
-behind a common `IOptimizer<T, R>` interface.
-- `convex/` — `LBFGS` (unconstrained), `AugmentedLagrangian` and `SQP`
-  (linear equality, inequality and box constraints).
-- `nongradopt/` — derivative-free `NelderMead` (box-constrained) and
-  `DifferentialEvolution` (global search, with the population evaluated in parallel).
-  Use them on noisy or non-smooth objectives such as backtest performance.
-
-### Statistics — `stats/`
-Descriptive statistics, autocorrelation, and normal density, CDF and quantile.
-
-## Python and AI agents — `python/`
-pandas interface to the C++ engine (`nabia.backtest`, `nabia.latest_weights`).
-A market data downloader for equity indices, bond futures, commodities and crypto,
-stored in SQLite (PostgreSQL-ready). Three Claude agents (news analyzer, stats
-analyzer, execution) that set the risk budgets through MCP tools, on Claude or a
-local Ollama model, with a backtest mode for their decisions. A web app manages
-it all. See `python/README.md`.
-
-### Running the web app
-
-Run these from the repository root. The settings are in `ai_config.json`: the
-database (`sqlite:///market.db`), the symbols, the portfolio parameters and the
-model provider.
-
-1. **Install** (once). This also builds the C++ extension, so it needs CMake
-   and a C++20 compiler.
-   ```sh
-   python3 -m venv python/.venv
-   python/.venv/bin/pip install "./python[marketdata,ai,web,test]"
-   ```
-2. **Start the model.**
-   - Local model (`"provider": "ollama"`): pull the model once with
-     `ollama pull qwen3.8:latest`, then keep `ollama serve` running (or the
-     Ollama app).
-   - Claude (`"provider": "anthropic"`): set `ANTHROPIC_API_KEY` instead. Usage
-     is billed.
-   - The trend rule policy needs neither.
-3. **Start the web app.**
-   ```sh
-   PYTHONPATH=python python/.venv/bin/python -m nabia.web --config ai_config.json
-   ```
-   Then open http://127.0.0.1:8000. Add `--port <n>` to use another port, or
-   `--host 0.0.0.0` to expose it on the network (it has no authentication).
-4. **First run, from the Jobs tab:**
-   1. download market data;
-   2. collect news;
-   3. run a daily decision;
-
-   or start a backtest from the Backtests tab. Click a job to follow its live
-   log.
-
-You don't start the MCP servers (`nabia.ai.servers.news`, `.stats`,
-`.portfolio`) yourself. Each agent run launches the ones it needs as
-subprocesses and stops them at the end. If port 8000 is already in use, stop the
-old server with `lsof -ti :8000 | xargs kill`.
-
-## Applications
-
-- `nabia_rb_backtest` (`apps/rb_backtest/`) — runs a risk budgeting backtest
-  from a CSV of asset prices and a JSON file of portfolio parameters. It writes a
-  CSV with the weights, risk contributions, transaction costs, returns, PnL,
-  equity and drawdown at every date, plus a metrics summary. See
-  `apps/rb_backtest/README.md`.
-
-## Building
+Needs CMake ≥ 3.25 and a C++20 compiler (pdflatex for the PDFs). Eigen, iir1, Catch2, nlohmann/json and
+pybind11 are found on the system or fetched.
 
 ```sh
-cmake --preset debug && cmake --build --preset debug && ctest --preset debug
+cd cpp
+cmake --preset debug                    # configure (once, or after editing CMakeLists)
+cmake --build --preset debug -j         # library, tests, command-line app, examples, PDFs
+ctest --preset debug                    # the test suite
+cmake --build --preset debug --target nabia_docs   # only the PDFs of cpp/doc
 ```
 
-Presets: `debug`, `release`, `asan`. Dependencies: Eigen and iir1 (fetched
-automatically if not installed), nlohmann/json for the applications, Catch2
-for the tests. Turn the applications off with `-DNABIA_BUILD_APPS=OFF`.
-
-## Debugging Eigen values
-
-LLDB (the debugger CLion uses on macOS) shows Eigen objects as raw storage
-pointers. `tools/lldb/eigen_lldb.py` makes it show their values instead:
-
-```
-(Eigen::MatrixXd) m = 2x3 [[1, 2, 3], [4, 5, 6]]
-(Eigen::VectorXd) v = 4 [0.1, 0.2, 0.3, 0.4]
-```
-
-It covers `Matrix`, `Array` (dynamic or fixed size, row or column major),
-contiguous `Map` views and references to them. Expanding a variable lists its
-elements as `[i]` or `[i,j]`, and large matrices are shortened in the one-line
-summary. Enable it once by adding the import to `~/.lldbinit`, which both
-command-line `lldb` and CLion read:
+Presets: `debug`, `release`, `releaseWithDebugInfo`, `asan`. Running the command-line app:
 
 ```sh
-echo "command script import $PWD/tools/lldb/eigen_lldb.py" >> ~/.lldbinit
+./build/debug/apps/rb_backtest/nabia_rb_backtest \
+    --prices apps/rb_backtest/example/prices.csv \
+    --config apps/rb_backtest/example/portfolio.json \
+    --output /tmp/result.csv
 ```
+
+In CLion: open `cpp/`. CLion reads `CMakePresets.json`; enable the `debug` preset (Settings → Build →
+CMake), then pick the `nabia_tests` or `nabia_rb_backtest` target and Run or Debug.
+
+### 2. The wheel — from C++ to Python
+
+Needs [uv](https://docs.astral.sh/uv/). Builds one wheel per Python version into `dist/`, and tests each one:
+
+```sh
+cpp/scripts/build_wheels.sh 3.14        # the Python version of your .venv (no argument: 3.10–3.14)
+NABIA_WHEEL_BUILD_TYPE=RelWithDebInfo cpp/scripts/build_wheels.sh 3.14   # with debug symbols
+```
+
+Rebuild the wheel whenever the C++ code changes, then run steps 3 and 4 again.
+
+### 3. Python project — `python/` (PyCharm)
+
+```sh
+python/scripts/setup_env.sh             # python/.venv: the wheel + nabia (editable) + extras
+cd python
+.venv/bin/python -m pytest              # bridge tests and package tests
+.venv/bin/python examples/01_factor_replication.py             # 01 … 06, each plots its results
+NABIA_NO_SHOW=1 .venv/bin/python examples/05_forecasting.py    # save the figures only
+.venv/bin/python -m nabia.marketdata --db sqlite:///../data/market.db --start 2010-01-01   # download data
+doc/build.sh                            # python/doc/nabia_python_reference.pdf
+```
+
+In PyCharm: open `python/` and select `python/.venv/bin/python` as the interpreter (Settings → Python
+Interpreter → Add → Existing). Examples and tests then run and debug directly.
+
+### 4. Web UI — `webui/` (PyCharm)
+
+```sh
+webui/scripts/setup_env.sh              # webui/.venv: the wheel + python/ (editable) + nabia_webui
+cd webui
+.venv/bin/python -m pytest              # the web UI tests
+.venv/bin/python -m nabia_webui.web --config ai_config.json      # http://127.0.0.1:8000
+.venv/bin/python -m nabia_webui.ai daily --config ai_config.json # one daily decision from the command line
+doc/build.sh                            # webui/doc/nabia_webui_reference.pdf
+```
+
+For the agents, start the model first: `ollama serve` for Ollama, or set `ANTHROPIC_API_KEY` for Claude.
+The trend-rule policy needs neither.
+
+In PyCharm: open `webui/` and select `webui/.venv/bin/python` as the interpreter. Run configuration for
+the web app: module `nabia_webui.web`, parameters `--config ai_config.json`, working directory `webui/`
+(the database path in `ai_config.json` is relative to it).
+
+### Debugging C++ called from Python
+
+1. Build the wheel with debug symbols (step 2 with `NABIA_WHEEL_BUILD_TYPE=RelWithDebInfo`), then run
+   `python/scripts/setup_env.sh` again.
+2. Start the script in PyCharm with a breakpoint before the C++ call.
+3. In CLion: Run → Attach to Process, and pick that Python process. Breakpoints in `cpp/src` are hit.
+
+Without rebuilding the wheel: `cd cpp && cmake --preset python-bridge && cmake --build --preset python-bridge`
+builds the modules next to the package sources; run the script with `PYTHONPATH=<repo>/cpp/bindings`.
+
+## Wheels for other versions and platforms
+
+`cpp/scripts/build_wheels.sh` builds and tests one wheel per CPython version (3.10–3.14) on the current
+machine. cibuildwheel (configured in `cpp/pyproject.toml`) and the GitHub workflow
+`.github/workflows/wheels.yml` build them for Linux, macOS and Windows. See section 14.5 of the C++
+reference.
 
 ## Documentation
 
-`doc/` holds LaTeX notes on the theory, proofs and implementation of the
-algorithms. Its subfolders mirror the library (`doc/forecast/`,
-`doc/optimization/convex/`, ...) and share a style file in `doc/common/`.
+Each project's `doc/` folder has its LaTeX sources and the built PDFs:
 
-[`docs/nabia_methodology.pdf`](docs/nabia_methodology.pdf) is the project-wide
-document. It covers the architecture and the methodology of every component:
-the C++ engine, market data, the AI agents with news sentiment and relevance,
-and the web app. Its source is `doc/project/nabia_methodology.tex`. The code
-excerpts in it are extracted from the source at build time by
-`doc/project/extract_snippets.py`, so they always match the current code
-(`--target nabia_doc_nabia_methodology`).
+- `cpp/doc`: the C++ reference (architecture, every method stated mathematically with proofs, the
+  command-line application, the bindings and the wheels) and theory notes on exponential smoothing, the
+  Kalman filter, Gaussian processes, convex optimization and elastic net regression. Built by the
+  `nabia_docs` CMake target.
+- `python/doc`: the Python reference (the library from Python, backtests, analytics with their
+  formulas, market data, the worked examples). Built by `python/doc/build.sh`.
+- `webui/doc`: the web UI reference (agents and their complete prompts, every MCP tool, the agent loop,
+  decisions to positions, news sentiment, the web app). Built by `webui/doc/build.sh`.
 
-The PDFs are built with the library whenever `pdflatex` is installed (a TeX
-distribution such as TeX Live or MacTeX); turn them off with
-`-DNABIA_BUILD_DOCS=OFF`. To build only the documentation:
-
-```sh
-cmake --preset debug                              # once, to configure
-cmake --build --preset debug --target nabia_docs  # all PDFs
-cmake --build --preset debug --target nabia_doc_kalman_filter   # a single one
-```
-
-Each PDF is compiled in the matching folder of the build tree (for example
-`build/debug/doc/forecast/kalman_filter.pdf`) and copied next to its source
-(`doc/forecast/kalman_filter.pdf`), so the current PDFs can be read directly
-from the repository. If a document fails to compile, its LaTeX log is in the
-build tree (`build/debug/doc/forecast/kalman_filter.log`). To compile one by hand
-without CMake:
-
-```sh
-cd doc/forecast
-TEXINPUTS=../common: pdflatex kalman_filter.tex   # run 2-3 times for references
-```
+Code excerpts, prompts and tool descriptions are extracted from the sources at build time, so the
+documents always show the current code.

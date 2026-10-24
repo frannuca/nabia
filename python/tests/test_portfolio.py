@@ -95,7 +95,8 @@ def test_same_parameters_as_the_cli_example():
     """The CLI's JSON configuration is accepted unchanged."""
     from pathlib import Path
 
-    example = Path(__file__).parents[2] / "apps" / "rb_backtest" / "example"
+    # A copy of cpp/apps/rb_backtest/example, the input of the C++ command-line application.
+    example = Path(__file__).parent / "data" / "rb_backtest_example"
     params = json.loads((example / "portfolio.json").read_text())
     prices = pd.read_csv(example / "prices.csv", index_col="date", parse_dates=True)
     res = nabia.backtest(prices, params)

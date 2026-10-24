@@ -1,0 +1,53 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "pybind11>=2.13"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "nabia_python_bridge"
+version = "0.1.0"
+description = "Python bindings of the nabia C++ numerical library"
+readme = "bindings/README.md"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+pandas = ["pandas>=2.0"]
+test = ["pytest>=7", "pandas>=2.0"]
+examples = ["pandas>=2.0", "matplotlib>=3.7", "yfinance>=0.2"]
+
+[tool.scikit-build]
+sdist.exclude = ["build/", "cmake-build-*/", ".idea/", "doc/", "compile_commands.json", "bindings/nabia_python_bridge/_*.so"]
+# This C++ project (cpp/) is the CMake source; only the Python bindings are built.
+cmake.source-dir = "."
+cmake.build-type = "Release"
+# CMake installs the whole package (bindings/nabia_python_bridge/*.py, _core and _rb_backtest), so a
+# development build's modules or __pycache__ left in the source tree never end up in the wheel.
+wheel.packages = []
+build-dir = "build/{wheel_tag}"
+
+[tool.scikit-build.cmake.define]
+NABIA_BUILD_PYTHON_BRIDGE = "ON"
+NABIA_BUILD_APPS = "OFF"
+NABIA_BUILD_TESTS = "OFF"
+NABIA_BUILD_EXAMPLES = "OFF"
+NABIA_BUILD_DOCS = "OFF"
+# nabia, iir1 and rb_backtest_core are static libraries linked into the extension modules.
+CMAKE_POSITION_INDEPENDENT_CODE = "ON"
+
+# Wheels for every supported Python and platform (run by .github/workflows/wheels.yml):
+#   pipx run cibuildwheel==4.3.4 --platform linux cpp     (from the repository root; Linux needs Docker)
+# Each wheel is tested with the bridge tests of the Python project ({project} is the repository root).
+[tool.cibuildwheel]
+build = "cp310-* cp311-* cp312-* cp313-* cp314-*"
+skip = "*-musllinux_* *-win32 *-manylinux_i686"
+build-frontend = "build[uv]"
+test-extras = ["test"]
+test-command = "pytest -q -p no:cacheprovider {project}/python/tests/bridge"
+
+[tool.cibuildwheel.linux]
+# GCC 12+ for C++20; Eigen and iir1 are fetched at configure time.
+manylinux-x86_64-image = "manylinux_2_28"
+manylinux-aarch64-image = "manylinux_2_28"
+
+[tool.cibuildwheel.macos]
+environment = { MACOSX_DEPLOYMENT_TARGET = "13.0" }

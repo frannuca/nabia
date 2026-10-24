@@ -1,20 +1,27 @@
+# Builds and IDEs
 build/
+cmake-build-*/
 .cache/
 compile_commands.json
 .DS_Store
 .vscode/
 .idea/
+dist/
 
-# Python
-python/.venv/
+# Python (python/ and webui/ each have their own .venv)
+.venv/
 __pycache__/
 *.egg-info/
 .pytest_cache/
-python/nabia/_nabia*.so
-python/nabia/_nabia*.pyd
-# Local market data databases
+# Development build of the bindings (cmake --preset python-bridge in cpp/)
+cpp/bindings/nabia_python_bridge/_*.so
+cpp/bindings/nabia_python_bridge/_*.pyd
+python/examples/.data/
+python/examples/figures/
+
+# Local market data databases (data/market.db is shared by python/ and webui/)
 *.db
 *.sqlite
-# Agent scratch directory (config copy for the MCP servers)
+# Agent scratch directory (config copy for the MCP servers) and web app log
 .nabia_ai/
 .nabia_web.log

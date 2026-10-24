@@ -12,12 +12,11 @@ import numpy as np
 import pandas as pd
 
 try:
-    from . import _nabia
-except ImportError as error:  # pragma: no cover - depends on the build
+    from nabia_python_bridge import _rb_backtest as _nabia
+except ImportError as error:  # pragma: no cover - depends on the environment
     raise ImportError(
-        "the nabia C++ extension (nabia._nabia) is not built. From the repository root run\n"
-        "  cmake --preset python && cmake --build --preset python\n"
-        "or install the package with  pip install ./python"
+        "the nabia C++ extension (nabia_python_bridge._rb_backtest) is not installed. Build the wheel\n"
+        "in the C++ project (cpp/scripts/build_wheels.sh) and install it with python/scripts/setup_env.sh"
     ) from error
 
 __all__ = ["BacktestResult", "TargetWeights", "backtest", "latest_weights"]

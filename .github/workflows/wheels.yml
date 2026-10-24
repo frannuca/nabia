@@ -1,0 +1,37 @@
+# Builds and tests nabia_python_bridge wheels for CPython 3.10-3.14 on Linux, macOS and Windows
+# with cibuildwheel (settings in cpp/pyproject.toml), testing each with python/tests/bridge. Runs on
+# demand, on version tags (v*), and on pull requests that touch the C++ project or the bridge tests.
+name: wheels
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths: ["cpp/**", "python/tests/bridge/**", "python/examples/0*.py", ".github/workflows/wheels.yml"]
+
+jobs:
+  wheels:
+    name: ${{ matrix.os }} ${{ matrix.archs }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04,     archs: x86_64 }
+          - { os: ubuntu-24.04-arm, archs: aarch64 }
+          - { os: macos-14,         archs: arm64 }
+          - { os: macos-14,         archs: x86_64 }   # cross-compiled, tested under Rosetta
+          - { os: windows-latest,   archs: AMD64 }
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pypa/cibuildwheel@v4.3.4
+        with:
+          package-dir: cpp
+          output-dir: wheelhouse
+        env:
+          CIBW_ARCHS: ${{ matrix.archs }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}-${{ matrix.archs }}
+          path: wheelhouse/*.whl

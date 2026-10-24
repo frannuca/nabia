@@ -1,13 +1,16 @@
-"""nabia: systematic trend strategy tools.
+"""nabia: systematic trend strategy tools in Python, on top of the nabia C++ library.
 
 - ``nabia.backtest`` / ``nabia.latest_weights``: risk budgeting portfolio
   backtests and current target weights, computed by the C++ core (the
-  ``nabia._nabia`` extension module).
+  ``nabia_python_bridge._rb_backtest`` extension module of the nabia_python_bridge wheel).
+- ``nabia.analytics``: returns, volatilities, correlations, trend signals and budget
+  projections on pandas price frames.
 - ``nabia.marketdata``: download market data (equity indices, bond futures,
-  commodities) and store it in a SQL database (SQLite now, PostgreSQL later).
+  commodities, crypto) and store it in a SQL database (SQLite or PostgreSQL).
 
-The C++ extension is imported lazily, so ``nabia.marketdata`` works even where
-the extension has not been built.
+The whole C++ library (optimizers, risk measures, forecasting, regression...) is in
+``nabia_python_bridge``, installed from the wheel built by the C++ project (../cpp).
+The extension is imported lazily, so ``nabia.marketdata`` works without the wheel.
 """
 
 from __future__ import annotations
