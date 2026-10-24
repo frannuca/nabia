@@ -1,6 +1,8 @@
 // Private helper: run independent tasks on a few threads.
 #pragma once
 
+#include "joining_thread.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
@@ -44,7 +46,7 @@ void parallel_for(std::int64_t count, int threads, const Task& task) {
         }
     };
     {
-        std::vector<std::jthread> workers;
+        std::vector<JoiningThread> workers;
         workers.reserve(static_cast<std::size_t>(std::max(0, threads - 1)));
         for (int t = 1; t < threads; ++t) {
             workers.emplace_back(work);

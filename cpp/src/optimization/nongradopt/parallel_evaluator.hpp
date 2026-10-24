@@ -1,11 +1,12 @@
 // Private helper: evaluates a function on many inputs with a few threads.
 #pragma once
 
+#include "../../common/joining_thread.hpp"
+
 #include <functional>
 #include <future>
 #include <mutex>
 #include <queue>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -58,7 +59,7 @@ public:
 
         // Declared after jobs and mutex: on any exit the consumers are joined
         // (and finish the queue) before what they use is destroyed.
-        std::vector<std::jthread> consumers;
+        std::vector<nabia::detail::JoiningThread> consumers;
         if (num_threads_ == 1) {
             consume();
         } else {
