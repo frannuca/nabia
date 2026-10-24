@@ -11,6 +11,7 @@ name: wheels
 on:
   workflow_dispatch:
   push:
+    branches: [main]
     tags: ["v*"]
   pull_request:
     paths: ["cpp/**", "python/tests/bridge/**", "python/examples/0*.py", "python/scripts/**", ".github/workflows/wheels.yml"]
