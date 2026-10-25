@@ -53,8 +53,7 @@ struct SQPResult {
 /// at the cost of a dense n x n matrix: prefer it when f is expensive and n
 /// is moderate. Constraints and parameters follow the same conventions as
 /// AugmentedLagrangian. The initial guess may be infeasible.
-/// See doc/optimization/convex/convex_optimization.tex (built as
-/// convex_optimization.pdf) for the theory and the algorithm.
+/// See the chapter "Convex optimization" of doc/nabia.pdf for the theory and the algorithm.
 class SQP: public IConvexOptimization<SQPResult> {
 public:
     using Objective = std::function<double(const Eigen::VectorXd&)>;

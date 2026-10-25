@@ -1,0 +1,40 @@
+# nabia: the Python project (open this folder in PyCharm; its .venv is the interpreter). Pure Python: the C++
+# library comes from the nabia_python_bridge wheel built by the C++ project (../cpp, into ../dist).
+#   scripts/setup_env.sh            # .venv: the wheel from ../dist + this package (editable) + extras
+#   scripts/fetch_wheels.sh         # or: download the wheels published on GitHub into ../dist first
+#   .venv/bin/python -m nabia.sentiment_rb   # the sentiment risk-budgeting pipeline
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nabia"
+version = "0.1.0"
+description = "Sentiment-modulated risk budgeting and portfolio tools on the nabia C++ library"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "nabia_python_bridge>=0.1.0",   # the C++ library (wheel from ../dist)
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "matplotlib>=3.7",              # figures of the pipeline
+    "pydantic>=2",                  # LLM output schemas
+]
+
+[project.optional-dependencies]
+llm = ["anthropic>=1.13"]           # nabia.sentiment_rb --live
+marketdata = ["sqlalchemy>=2.0", "yfinance>=0.2.40", "ccxt>=4.0"]
+postgres = ["psycopg[binary]>=3.1"]
+test = ["pytest>=7", "sqlalchemy>=2.0"]
+
+[project.scripts]
+nabia-sentiment = "nabia.sentiment_rb.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["nabia*"]
+
+[tool.setuptools.package-data]
+"nabia.sentiment_rb" = ["prompts/*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

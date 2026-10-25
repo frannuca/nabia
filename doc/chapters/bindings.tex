@@ -1,0 +1,155 @@
+% The command-line application, the Python bindings and their development build.
+
+\chapter{Command-line application}\label{c:sec:cli}
+\code{nabia\_rb\_backtest -{}-prices prices.csv -{}-config config.json -{}-output out.csv}:
+\begin{itemize}
+  \item \textbf{Prices} come from a CSV with ISO dates and one column per asset. Empty
+        cells are missing values.
+  \item \textbf{Alignment}: dates where any asset is missing are dropped, and the drop is
+        reported.
+  \item \textbf{Returns}: simple returns are computed after alignment.
+  \item \textbf{Parameters} come from a JSON file with the keys of
+        Table~\ref{c:tab:portfolio}, plus an optional \code{start} and \code{end}. Unknown
+        keys are rejected, so a typo fails loudly. Budgets can be a list or an object keyed
+        by asset name.
+  \item \textbf{Output}: a CSV row per date with the weights, the risk contributions on
+        rebalance dates, turnover, costs, returns, PnL, equity and drawdown, and an optional
+        metrics CSV.
+\end{itemize}
+\begin{codepointers}
+  \codeitem{cli_main}{entry point}
+  \codeitem{cli_config}{JSON parser}
+  \codeitem{cli_read_prices}{CSV reader}
+  \codeitem{cli_write}{CSV writer}
+\end{codepointers}
+
+
+\chapter{Backtest bindings for the Python package}\label{c:sec:rbbindings}
+The module \code{nabia\_python\_bridge.\_rb\_backtest} reuses the application's pipeline and
+JSON parser, so the command line and Python accept the same parameters with the same error
+messages. The \code{nabia} package of the Python project wraps it in pandas objects
+(\code{nabia.backtest}, \code{nabia.latest\_weights}; Chapter~\ref{p:sec:bindings}).
+Data crosses the boundary in simple forms:
+\begin{itemize}
+  \item dates as \code{int64} days since 1970-01-01 (numpy \code{datetime64[D]});
+  \item prices as a \code{float64} matrix;
+  \item parameters as JSON text.
+\end{itemize}
+The GIL is released during the computation, so the engine's threads run in parallel.
+\code{latest\_weights} solves only the last rebalance: the target weights to hold now.
+\snippet{binding_prepare}{C++}{Shared preparation: parse, align, window, returns, budgets}
+\begin{codepointers}
+  \codeitem{binding_backtest}{\code{backtest} binding}
+  \codeitem{binding_latest}{\code{latest\_weights} binding}
+  \codeitem{binding_module}{module definition}
+\end{codepointers}
+
+\chapter{The full library in Python: \texorpdfstring{\code{nabia\_python\_bridge}}{nabia\_python\_bridge}}\label{c:sec:bridge}
+
+The pybind11 package \code{nabia\_python\_bridge} exposes \emph{every} public class and
+function of the C++ library, for research and scripting from Python. Its sources are in
+\code{bindings}: the C++ of the modules in \code{src}, and the Python files of the package
+(re-exports and the pandas interface \code{frames}) in \code{nabia\_python\_bridge}.
+
+\section{Modules}
+\begin{center}\small
+\begin{tabularx}{\linewidth}{@{}l X@{}}
+\toprule
+Module & Contents \\
+\midrule
+\code{stats} & \code{mean}, \code{variance}, \code{stddev}, \code{autocorrelation}; \code{normal\_pdf/cdf/quantile} (vectorized) \\
+\code{signal} & \code{EWMA}, \code{ButterworthBandPass} (streaming \code{process}, batch \code{apply}), \code{moving\_average}, \code{exponential\_moving\_average}, \code{diff} \\
+\code{forecast} & \code{KalmanFilter} (local level, local linear trend, custom), \code{GaussianProcess} with squared exponential, Mat\'ern 5/2, periodic, sum and product kernels (\code{k1 + k2}, \code{k1 * k2}), \code{SimpleExponentialSmoothing}, \code{Forecast} \\
+\code{optimization} & \code{LBFGS}, \code{AugmentedLagrangian}, \code{SQP}, \code{NelderMead}, \code{DifferentialEvolution} with Python objectives; \code{BoxConstraints}, \code{LinearConstraint} \\
+\code{risk} & \code{Volatility}, \code{ValueAtRisk}, \code{ExpectedShortfall}, \code{RiskBudgeting} \\
+\code{strategy} & \code{RiskBudgetingPortfolio}, \code{compute\_performance}, \code{equity\_curve}, \code{drawdown\_series} \\
+\code{regression} & \code{ElasticNet}, \code{elastic\_net\_path}, \code{lambda\_max}, \code{lambda\_grid}, \code{RegressionEngine} (\S\ref{c:sec:regression}) \\
+\code{frames} & pandas interface: \code{backtest}, \code{regress}, \code{performance}, \code{metrics\_dict} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+The \code{TimeSeries} and \code{DataFrame} containers are not bound, because pandas does
+their job in Python. Where an engine takes indexed data, \code{frames} maps the pandas index
+to row positions and back.
+
+\section{Design}
+\begin{description}
+  \item[Parameters as keyword arguments.] Every parameter struct is built from keyword
+        arguments, and a model accepts the fields directly:
+        \code{signal.EWMA(alpha=0.2)}. Each keyword is assigned through the bound
+        attribute, so the attribute's type checks apply, and an unknown name raises
+        \code{AttributeError} instead of being silently ignored. \code{lambda} is a Python
+        keyword, so it is spelled \code{lambda\_}.
+  \item[Arrays.] Vectors and matrices are \code{float64} numpy arrays. Matrices have one row
+        per observation, as in the C++ code. Results are copies, so they stay valid after
+        the next run.
+  \item[Errors.] \code{std::invalid\_argument} becomes \code{ValueError}, and ``not fitted''
+        (\code{std::logic\_error}) becomes \code{RuntimeError}.
+  \item[GIL.] Fits, backtests, regressions and optimizations release the GIL, so the
+        engines' own threads run in parallel. A Python objective is wrapped in a
+        \code{PyCallable}. Copies of it share one pointer, and every call, and the final
+        release, takes the GIL. C++ can therefore call it from any thread. It is only
+        faster with threads if the objective itself releases the GIL (numpy on large
+        arrays). A Python exception raised in an objective propagates out of
+        \code{optimize()}.
+  \item[Templates.] \code{RiskBudgeting<Measure>} is a template. The binding wraps its
+        three instantiations in one \code{AnyRiskBudgeting} type (a \code{std::variant}),
+        so Python sees a single \code{RiskBudgeting} class that accepts any of the three
+        measures.
+  \item[Kernels] are polymorphic and owned by \code{unique\_ptr} in C++. In Python they
+        are shared objects. \code{GaussianProcessParams} clones the kernel when it is set,
+        so fitting never modifies the user's kernel.
+  \item[Readable results.] The Python package re-exports each submodule and gives every
+        result struct a \code{\_\_repr\_\_} listing its fields.
+\end{description}
+\snippet{bridge_kwargs}{C++}{Parameter structs from keyword arguments}
+\snippet{bridge_pycallable}{C++}{A Python callable usable from any C++ thread}
+
+\section{pandas interface}
+\begin{itemize}
+  \item \code{frames.backtest(returns\_df, params=None, budget\_schedule=None, **fields)}
+        runs \code{RiskBudgetingPortfolio}. Budgets may be a mapping by column name, and
+        the schedule is a DataFrame indexed by date. It returns weights, target weights,
+        risk contributions, leverage, a performance frame and the metrics, all labelled.
+  \item \code{frames.regress(target, factors\_df, params=None, **fields)} aligns the
+        target and the factors on their common index and drops rows with a missing value.
+        It then runs the regression engine and returns the coefficients by factor name,
+        predictions and residuals by date, the first out-of-sample date, the best subset
+        of each size and the bootstrap table.
+  \item In both, enum fields also accept member names (\code{risk\_measure="ValueAtRisk"},
+        \code{validation="WalkForward"}), and the given parameters object is copied, never
+        modified.
+\end{itemize}
+\snippet{frames_regress}{Python}{\code{frames.regress}: alignment, engine and labelled results}
+\begin{codepointers}
+  \codeitem{bridge_module}{module definition}
+  \codeitem{bridge_any_rb}{\code{RiskBudgeting} over any measure}
+  \codeitem{bridge_objective}{Python objectives for the optimizers}
+  \codeitem{bridge_schedule}{budget schedule from rows and budgets}
+  \codeitem{bridge_regression}{regression bindings}
+  \codeitem{bridge_reexport}{re-export and \code{\_\_repr\_\_}}
+  \codeitem{frames_make_params}{parameters plus overrides}
+  \codeitem{frames_backtest}{\code{frames.backtest}}
+\end{codepointers}
+
+\section{Development build and tests}
+\begin{itemize}
+  \item \textbf{Development build.} The preset \code{python-bridge} builds \code{\_core} and
+        \code{\_rb\_backtest} in RelWithDebInfo, with the interpreter of \code{../nabia\_python/.venv}.
+        The modules are written next to the package's Python files, in the folder
+        \code{bindings/nabia\_python\_bridge}, so a script run with
+        \code{PYTHONPATH=cpp/bindings} imports them. Attaching CLion's debugger to that Python
+        process stops in the C++ code.
+  \item \textbf{Wheel.} \code{pyproject.toml} builds the package with scikit-build-core for each
+        Python version and platform (Chapter~\ref{ch:packaging}).
+  \item \textbf{Tests.} The bridge tests are Python tests, so they live in the Python project,
+        in \code{nabia\_python/tests/bridge}. The wheel scripts run them on every wheel they build.
+        They check each module against closed forms and numpy, and the binding semantics:
+        \begin{itemize}
+          \item Python objectives called from differential evolution's threads;
+          \item exceptions propagating out of objectives;
+          \item unknown parameter names rejected;
+          \item kernel composition;
+          \item frame alignment and budget schedules.
+        \end{itemize}
+\end{itemize}

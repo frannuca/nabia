@@ -1,0 +1,115 @@
+% Part II: what nabia is for and how its parts fit together.
+
+\chapter{Purpose and architecture}\label{ch:architecture}
+
+\section{Purpose}
+nabia researches \emph{systematic, risk-budgeted portfolios} across equity indices, government bond and credit
+markets, and commodities. A strategy has four stages, and the project provides a component for each:
+\begin{enumerate}
+  \item \textbf{Signals}: filters and forecasters that extract trends from noisy prices (Chapters~\ref{c:sec:signal}
+        and~\ref{c:sec:forecast}), a factor regression engine (Chapter~\ref{c:sec:regression}), and news sentiment
+        produced by a language model and combined with market indicators per asset (Part~\ref{part:sentiment}).
+  \item \textbf{Allocation}: \emph{risk budgeting} decides each asset's share of portfolio risk
+        (Chapter~\ref{c:sec:riskbudgeting}); the sentiment pipeline modulates those budgets, or the side of each
+        position (long or short).
+  \item \textbf{Simulation}: a walk-forward engine turns budgets into weights at each rebalance, without
+        look-ahead, and accounts for drift and costs (Chapter~\ref{c:sec:engine}).
+  \item \textbf{Evaluation}: performance metrics (Chapter~\ref{c:sec:metrics}), information coefficients and
+        in-sample versus out-of-sample diagnostics (Part~\ref{part:sentiment}).
+\end{enumerate}
+The central design decision is to separate \emph{what decides the risk budgets} (a fixed rule, equal risk, or
+the sentiment model) from \emph{how budgets become positions} (a tested numerical engine). A signal never sets
+weights directly: it changes budgets within bounds, or the side of a position, and the engine computes the
+weights, so each decision is bounded and reproducible from its stored budgets.
+
+\section{Components}
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+  box/.style={draw, rounded corners=3pt, align=center, minimum height=9mm, font=\small, fill=white, inner sep=4pt},
+  layer/.style={draw, dashed, rounded corners=6pt, inner sep=7pt, gray},
+  arrow/.style={-{Stealth[length=2mm]}, thick, gray!70!black},
+  lbl/.style={font=\scriptsize\itshape, gray!60!black}]
+  \node[box, minimum width=19mm] (df) {dataframe};
+  \node[box, right=2.5mm of df, minimum width=19mm] (sig) {signal\\(iir1)};
+  \node[box, right=2.5mm of sig, minimum width=19mm] (fc) {forecast};
+  \node[box, right=2.5mm of fc, minimum width=19mm] (opt) {optimization};
+  \node[box, right=2.5mm of opt, minimum width=19mm] (risk) {risk};
+  \node[box, right=2.5mm of risk, minimum width=19mm] (reg) {regression};
+  \node[box, below=4mm of $(fc)!0.5!(opt)$, minimum width=60mm] (strat) {strategy: RiskBudgetingPortfolio\\(walk-forward engine, multithreaded)};
+  \node[layer, fit=(df)(reg)(strat), label={[lbl]left:\shortstack[r]{cpp/\\C++20}}] (core) {};
+  \node[box, below=9mm of strat, xshift=-38mm, minimum width=42mm] (cli) {nabia\_rb\_backtest\\(CLI: CSV + JSON)};
+  \node[box, below=9mm of strat, xshift=30mm, minimum width=52mm] (bind) {nabia\_python\_bridge wheel\\(\_core, \_rb\_backtest)};
+  \node[box, below=10mm of bind, xshift=-30mm, minimum width=44mm] (pkg) {nabia: portfolio,\\analytics, marketdata};
+  \node[box, right=4mm of pkg, minimum width=44mm] (rb) {nabia.sentiment\_rb\\(pipeline)};
+  \node[box, below=8mm of rb, minimum width=44mm] (llm) {Claude API (live)\\or offline mock};
+  \node[box, below=8mm of pkg, minimum width=44mm] (db) {SQL database\\(SQLite / PostgreSQL)};
+  \node[layer, fit=(pkg)(rb)(llm)(db), label={[lbl]left:\shortstack[r]{nabia\_python/\\Python}}] (py) {};
+  \draw[arrow] (strat) -- (cli);
+  \draw[arrow] (strat) -- (bind);
+  \draw[arrow] (bind) -- (pkg);
+  \draw[arrow] (bind) -- (rb);
+  \draw[arrow] (rb) -- (llm);
+  \draw[arrow] (pkg) -- (db);
+\end{tikzpicture}
+\caption{Components and dependencies. Arrows point from a component to what uses it.}
+\label{fig:architecture}
+\end{figure}
+
+\begin{description}
+  \item[C++ library] (\code{cpp/include/nabia}, \code{cpp/src}): the static library \code{nabia::nabia}, built with
+        CMake, in C++20, on Eigen (linear algebra) and iir1 (filter design). Each module exposes an abstract
+        interface whose parameter struct is owned through \code{std::unique\_ptr}: \code{IFilter<P>}
+        (\coderef{ifilter}), \code{IForecaster<P>} (\coderef{iforecaster}), \code{IOptimizer<P,R>}
+        (\coderef{ioptimizer}), \code{IRiskMeasure} (\coderef{irisk}). Part~\ref{part:core} describes every
+        method, Part~\ref{part:derivations} derives the forecasters, the optimizers and the elastic net.
+  \item[Application] \code{nabia\_rb\_backtest} (\code{cpp/apps/rb\_backtest}): a risk-budgeting backtest from a
+        prices CSV and a JSON configuration (Chapter~\ref{c:sec:cli}).
+  \item[Bindings] (\code{cpp/bindings}): one Python package, \code{nabia\_python\_bridge}, with two pybind11
+        modules: \code{\_core} (the whole library) and \code{\_rb\_backtest} (the application's JSON backtest).
+        \code{cpp/pyproject.toml} builds them into a wheel per Python version and platform
+        (Chapters~\ref{c:sec:bridge}--\ref{ch:packaging}).
+  \item[Python package] (\code{nabia\_python/nabia}): \code{nabia.backtest} and \code{nabia.latest\_weights} on
+        pandas data (Chapter~\ref{p:sec:bindings}), analytics (Chapter~\ref{p:sec:stats}), market data
+        (Chapter~\ref{p:sec:marketdata}), and the sentiment risk-budgeting pipeline \code{nabia.sentiment\_rb}
+        (Part~\ref{part:sentiment}).
+\end{description}
+
+\section{Directory map}
+\begin{center}\small
+\begin{tabularx}{\linewidth}{@{}>{\raggedright\arraybackslash}p{5.2cm}>{\raggedright\arraybackslash}X@{}}
+\toprule
+Path & Contents \\
+\midrule
+\nolinkurl{cpp/include/nabia/dataframe} & \code{TimeSeries}, \code{DataFrame}, the \code{TimeIndex} concept \\
+\nolinkurl{cpp/include/nabia/signal} & \code{IFilter}, \code{EWMA}, \code{ButterworthBandPass}, smoothing helpers \\
+\nolinkurl{cpp/include/nabia/forecast} & \code{IForecaster}, SES, Kalman filter, Gaussian process, kernels \\
+\nolinkurl{cpp/include/nabia/optimization} & \code{IOptimizer}; \code{convex/}: constraints, L-BFGS, augmented Lagrangian, SQP; \code{nongradopt/}: Nelder--Mead, differential evolution \\
+\nolinkurl{cpp/include/nabia/risk} & \code{IRiskMeasure}, volatility, VaR, ES, \code{RiskBudgeting<Measure>} \\
+\nolinkurl{cpp/include/nabia/stats, strategy, regression} & statistics; the portfolio engine and metrics; elastic net and the regression engine \\
+\nolinkurl{cpp/src, cpp/tests} & implementations (same layout); Catch2 tests \\
+\nolinkurl{cpp/apps/rb_backtest} & the command-line backtest \\
+\nolinkurl{cpp/bindings} & pybind11 sources (\code{src}) and the Python files of the wheel (\code{nabia\_python\_bridge}) \\
+\nolinkurl{cpp/pyproject.toml, cpp/scripts} & wheel build (scikit-build-core, cibuildwheel), \code{build\_wheels.sh}, \code{.ps1} \\
+\nolinkurl{nabia_python/nabia} & \code{portfolio.py}, \code{analytics.py}, \code{marketdata/}, \code{sentiment\_rb/} \\
+\nolinkurl{nabia_python/nabia/sentiment_rb} & \code{config.py}, \code{pipeline.py}, \code{\_\_main\_\_.py}; \code{data/}, \code{features/}, \code{llm/}, \code{model/}, \code{portfolio/}, \code{report/}, \code{prompts/} \\
+\nolinkurl{nabia_python/tests, scripts} & pytest suites (\code{tests/bridge} tests the wheel); \code{setup\_env}, \code{fetch\_wheels} \\
+\nolinkurl{doc} & this document and the pipeline's specification \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\section{Build and test summary}
+\begin{center}\small
+\begin{tabularx}{\linewidth}{@{}l X@{}}
+\toprule
+Task & Command (Chapter~\ref{ch:guide}) \\
+\midrule
+C++ build and tests & \code{cd cpp \&\& cmake --preset debug \&\& cmake --build --preset debug \&\& ctest --preset debug} \\
+Wheels & \code{cpp/scripts/build\_wheels.sh [versions]}; CI: \code{gh workflow run wheels.yml} \\
+Python environment and tests & \code{nabia\_python/scripts/setup\_env.sh}; \code{cd nabia\_python \&\& .venv/bin/python -m pytest} \\
+Pipeline & \code{.venv/bin/python -m nabia.sentiment\_rb [--config c.json] [--ic-sweep ...]} \\
+This document & \code{doc/build.sh [--figures]} \\
+\bottomrule
+\end{tabularx}
+\end{center}

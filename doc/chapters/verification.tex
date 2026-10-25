@@ -1,0 +1,62 @@
+% Part VIII: how each part is tested, and what is known to be limited.
+
+\chapter{Verification}\label{c:sec:verification}
+\begin{description}
+  \item[C++ (Catch2)] 104 test cases, plus an end-to-end run of the command-line application on its example
+        (\code{ctest --preset debug}).
+        \begin{itemize}
+          \item Results against closed forms: inverse volatility for uncorrelated equal budgets, Gaussian VaR and
+                ES, SES and Kalman steady states, filter gains at the band edges.
+          \item Optimizer results against known optima, with constraints.
+          \item Accounting identities of the portfolio engine to $10^{-15}$.
+          \item The elastic net against OLS, the ridge closed form and its optimality conditions; the regression
+                engine recovering known factors (exhaustive, forward, in-sample BIC), and bootstrap intervals
+                covering the true coefficients.
+          \item No look-ahead, thread-count independence, invalid input; the application's JSON and CSV parsing
+                and writing.
+        \end{itemize}
+        The suites run in debug, under AddressSanitizer with UndefinedBehaviorSanitizer, and the multithreaded code
+        under ThreadSanitizer.
+  \item[Bindings (pytest, \code{nabia\_python/tests/bridge})] every module of \code{nabia\_python\_bridge} against
+        closed forms and numpy, and the binding semantics (keyword parameters, Python objectives called from C++
+        threads, exceptions, kernel composition, frame alignment, budget schedules). The wheel scripts and
+        cibuildwheel run them on every wheel they build, on every platform.
+  \item[Python package (\code{nabia\_python/tests})] \code{nabia.backtest} against the command-line application on
+        its own example (a copy in \code{tests/data}), schedules and errors; the market data store, sources and
+        incremental download against fakes; two opt-in tests (\code{NABIA\_NETWORK\_TESTS=1}) download live data.
+  \item[Sentiment pipeline] \code{tests/test\_sentiment\_rb.py}: budgets positive, normalized, neutral at
+        $s=\tfrac12$ and within the change cap; directions with hysteresis; shorted positions keeping their risk
+        budget (Proposition~\ref{prop:rb-short}); the simulator reproducing nabia's engine; every ancestor feature
+        inherited exactly once. Each run also asserts: training rows purged by $h$, normalized scores in $[0,1]$,
+        risk contributions equal to the budgets at every rebalance ($<10^{-4}$, observed $<10^{-8}$), and, in
+        long-only mode, the simulator matching the engine.
+  \item[This document] Its excerpts, code locations and file pieces are extracted at build time; a function that no
+        longer exists stops the build.
+\end{description}
+
+\chapter{Limitations and future work}\label{c:sec:limitations}
+\begin{itemize}
+  \item \textbf{Gaussian risk.} VaR and ES are Gaussian; fat tails are not modelled. A historical or Cornish--Fisher
+        measure would fit the same interface.
+  \item \textbf{Factor regression} has constant coefficients, and its bootstrap is conditional on the selected model
+        (Chapter~\ref{c:sec:regression}). Exhaustive search grows as $\binom Nk$.
+  \item \textbf{SQP} solves its QP subproblems with the augmented Lagrangian to \code{qp\_tolerance}; on some strongly
+        convex mean-variance problems it was seen to stall at its iteration limit, so prefer the augmented Lagrangian
+        there until the QP step is made exact (an active-set QP).
+  \item \textbf{Wheels} for Linux, Intel macOS and Windows are built and tested in CI only; locally on macOS arm64.
+  \item \textbf{Sentiment pipeline.}
+        \begin{itemize}
+          \item The data and news are synthetic; the results measure how much of a \emph{known} news edge survives
+                the pipeline, not the value of real news. Real loaders replace two functions
+                (Chapter~\ref{ch:rb-synthetic}).
+          \item Positivity is imposed by eliminating negative coefficients and refitting, not by a constrained
+                solver; the selected set can differ from a non-negative elastic net's.
+          \item LLM scores are uncalibrated model judgements, and backtests before a model's training cutoff are
+                optimistic. The live path (\code{--live}) is implemented but scores only the most recent days;
+                Message Batches backfills are not implemented.
+          \item Long-short turnover is high (several times a year at news IC 0.2); a wider neutral band or higher
+                costs show how much of the edge survives trading.
+          \item Market data caveats: continuous futures jump at rolls; asynchronous closes bias same-day correlations
+                downwards.
+        \end{itemize}
+\end{itemize}

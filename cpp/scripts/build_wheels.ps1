@@ -1,13 +1,13 @@
 <#
 .SYNOPSIS
     Builds nabia_python_bridge wheels for Windows (win_amd64 by default) with cibuildwheel, and tests
-    each one with the bridge tests of the Python project (python/tests/bridge).
+    each one with the bridge tests of nabia_python (nabia_python/tests/bridge).
 
 .DESCRIPTION
     The Windows counterpart of build_wheels.sh. cibuildwheel downloads every CPython it needs, builds
     the wheel from this C++ project (cpp/pyproject.toml, scikit-build-core, MSVC), installs it in a
     clean environment and runs the tests. The wheels end up in dist\ at the repository root, where
-    python\scripts\setup_env.ps1 and webui\scripts\setup_env.ps1 install them from.
+    nabia_python\scripts\setup_env.ps1 installs them from.
 
     Needs, once:
       - Visual Studio 2022 Build Tools with the "Desktop development with C++" workload (C++20);

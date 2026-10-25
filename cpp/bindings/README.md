@@ -22,7 +22,7 @@ Where the C++ engines take time-indexed data, `frames` maps the pandas index to 
 The bindings are part of the C++ project (`cpp/`). Their sources are in `cpp/bindings`: the pybind11
 C++ in `src/` and the package's Python files (re-exports, the pandas interface `frames`) in
 `nabia_python_bridge/`. The package has two extension modules: `_core` (the whole library) and
-`_rb_backtest` (the JSON-configured backtest that the `nabia` package of `python/` wraps).
+`_rb_backtest` (the JSON-configured backtest that the `nabia` package of `nabia_python/` wraps).
 
 ```sh
 # Wheels for CPython 3.10-3.14 on this machine, each tested installed (needs uv) -> dist/
@@ -30,7 +30,7 @@ cpp/scripts/build_wheels.sh                              # or: build_wheels.sh 3
 NABIA_WHEEL_BUILD_TYPE=RelWithDebInfo cpp/scripts/build_wheels.sh 3.14   # with debug symbols
 
 # Current interpreter only
-python/.venv/bin/python -m pip wheel ./cpp --no-deps -w dist
+nabia_python/.venv/bin/python -m pip wheel ./cpp --no-deps -w dist
 
 # Windows (PowerShell; Visual Studio 2022 Build Tools, Git, Python): CPython 3.10-3.14, each tested
 cpp\scripts\build_wheels.ps1                              # or: -Versions 3.12,3.13
@@ -44,14 +44,14 @@ gh run download <run-id> -n all-wheels -D dist
 
 # Development build for debugging in CLion: modules written next to the .py files
 cd cpp && cmake --preset python-bridge && cmake --build --preset python-bridge
-PYTHONPATH=cpp/bindings python/.venv/bin/python my_script.py
+PYTHONPATH=cpp/bindings nabia_python/.venv/bin/python my_script.py
 ```
 
 The Python projects install the wheel from `dist/` with their `scripts/setup_env.sh` (`setup_env.ps1` on Windows)
 (`pip install --no-index --find-links dist nabia_python_bridge` by hand).
-The tests of the bindings are in the Python project, `python/tests/bridge`; the wheel scripts run them
-on every wheel. Every command is explained in section 14.5 of the C++ reference,
-[`cpp/doc/nabia_cpp_reference.pdf`](../doc/nabia_cpp_reference.pdf).
+The tests of the bindings are in the Python project, `nabia_python/tests/bridge`; the wheel scripts run them
+on every wheel. Every command is explained in the chapter "Wheels, cibuildwheel and GitHub Actions" of
+[`doc/nabia.pdf`](../../doc/nabia.pdf).
 
 The wheel needs only the system C++ runtime: nabia, iir1 and Eigen are linked statically, and numpy is
 installed by pip. A wheel works only with its CPython version, and on macOS the default oldest supported
@@ -73,13 +73,8 @@ version is 13.0 (`MACOSX_DEPLOYMENT_TARGET`).
 
 ## Examples
 
-Runnable scripts on real market data, covering the whole API, are in the Python project,
-[`python/examples/`](../../python/examples/README.md): factor replication with the regression engine,
-risk parity and budgeting, backtests, signals, forecasting and optimization. Each one plots its results.
-The theory behind each module, with derivations and pointers to the code, is in the C++ reference
-([`cpp/doc/nabia_cpp_reference.pdf`](../doc/nabia_cpp_reference.pdf)), and the regression engine has its
-own note, [`cpp/doc/regression/elastic_net_regression.pdf`](../doc/regression/elastic_net_regression.pdf).
-The snippets below are a quick tour.
+Usage from Python, the theory behind each module and how the wheel is built are in
+[`doc/nabia.pdf`](../../doc/nabia.pdf) (Parts III–V). The snippets below are a quick tour.
 
 ```python
 import numpy as np

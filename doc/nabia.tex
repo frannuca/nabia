@@ -1,0 +1,111 @@
+\documentclass[11pt,a4paper,oneside]{report}
+\usepackage{nabiadoc}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta,fit,calc}
+\usepackage{caption}
+\usepackage{tabularx}
+\usepackage{graphicx}
+\usepackage{xurl}  % code paths break at any character
+\captionsetup[lstlisting]{justification=raggedright, singlelinecheck=false, font=small, labelfont=bf}
+\setcounter{secnumdepth}{2}
+\setcounter{tocdepth}{1}
+
+% --- code excerpts and locations, generated at build time by extract_snippets.py ------------------------------
+\input{snippets.tex}
+\newcommand{\snippetsource}[1]{\csname snippet@#1\endcsname}
+\newcommand{\snippet}[3]{%
+  \lstinputlisting[language=#2, caption={#3\\{\footnotesize\ttfamily\snippetsource{#1}}}]{#1.txt}}
+% A code location as a breakable path (the location is a detokenized string).
+\newcommand{\codepath}[1]{\begingroup\edef\x{\csname snippet@#1\endcsname}\expandafter\nolinkurl\expandafter{\x}\endgroup}
+\newcommand{\coderef}[1]{{\footnotesize\codepath{#1}}}
+\newenvironment{codepointers}{%
+  \par\smallskip\begingroup\footnotesize\noindent\textcolor{blue!50!black}{\textbf{Code}}\par\nopagebreak
+  \begin{list}{}{\setlength{\leftmargin}{1.2em}\setlength{\itemsep}{0pt}\setlength{\parsep}{0pt}\setlength{\topsep}{1pt}}}%
+  {\end{list}\endgroup\smallskip}
+\newcommand{\codeitem}[2]{\item #2 --- \codepath{#1}}
+% A piece of a whole file (packaging chapter): workflow jobs, pyproject tables, scripts.
+\newcommand{\filepiece}[3]{\lstinputlisting[language=#2, caption={#3}]{#1.txt}}
+\newcommand{\cmd}{\lstinline[language=bash,basicstyle=\ttfamily\small]}
+\newenvironment{note}[1]{\par\medskip\noindent\rule{\linewidth}{0.4pt}\par\nopagebreak\noindent
+  \textbf{#1}\enspace}{\par\nopagebreak\noindent\rule{\linewidth}{0.4pt}\par\medskip}
+
+\lstdefinelanguage{yaml}{sensitive=true, comment=[l]{\#}, morestring=[b]", morestring=[b]', keywords={true,false,null}}
+\lstdefinelanguage{toml}{sensitive=true, comment=[l]{\#}, morestring=[b]", morestring=[b]', keywords={true,false}}
+\lstdefinelanguage{PowerShell}{sensitive=false, comment=[l]{\#}, morecomment=[s]{<\#}{\#>}, morestring=[b]",
+  morestring=[b]', keywords={param,if,else,elseif,foreach,throw,try,finally,function,return}}
+\lstdefinelanguage{cmake}{sensitive=false, comment=[l]{\#}, morestring=[b]",
+  keywords={if,else,endif,install,set,find_package,pybind11_add_module,target_link_libraries,set_target_properties}}
+\lstset{basicstyle=\ttfamily\scriptsize, captionpos=t, numbers=none, aboveskip=8pt, belowskip=8pt,
+        tabsize=4, keepspaces=true, breaklines=true, postbreak=\mbox{\textcolor{gray}{$\hookrightarrow$}\space}}
+\renewcommand{\lstlistingname}{Code}
+
+% --- notation ------------------------------------------------------------------------------------------------
+\newcommand{\sth}{\mathcal{S}}                % soft thresholding
+\newcommand{\Aeq}{A_{\mathrm{eq}}}
+\newcommand{\beq}{b_{\mathrm{eq}}}
+\newcommand{\Ain}{A_{\mathrm{in}}}
+\newcommand{\bin}{b_{\mathrm{in}}}
+\newcommand{\pos}[1]{\left[#1\right]_+}
+\newcommand{\anc}{\operatorname{anc}}
+\newcommand{\one}{\mathbf 1}
+% A figure produced by the pipeline (doc/figures, refreshed by build.sh --figures); skipped if absent.
+\newcommand{\pipelinefigure}[3]{\IfFileExists{figures/#1}{\begin{figure}[htbp]\centering
+  \includegraphics[width=\linewidth]{figures/#1}\caption{#2}\label{#3}\end{figure}}{}}
+
+\title{nabia\\[0.4em]\Large Methodology, implementation and user guide\\[0.3em]
+\large A C++ numerical library, its Python bindings, and sentiment-modulated risk budgeting}
+\author{nabia documentation}
+\date{October 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+nabia is a platform for researching systematic, risk-budgeted portfolios. This document is its single
+reference. It starts with a user guide (building, installing and running every part), then describes the
+architecture, every numerical method of the C++ library stated mathematically with proofs where a property
+is relied on, the full derivations behind the forecasters, the optimizers and the elastic net, the command-line
+application, the Python bindings and how they are packaged as wheels for every platform, the Python package,
+and the sentiment-modulated risk-budgeting pipeline: LLM news sentiment and market indicators combined per asset
+by an elastic net into a score that modulates risk budgets, long-only or long-short. Throughout, each concept
+points to the code that implements it, by file and line range, and the key code is shown in excerpts
+\emph{extracted from the source when the document is built}: they are the code that runs, and a renamed
+function stops the build instead of leaving a stale reference.
+\end{abstract}
+
+\tableofcontents
+
+\part{User guide}\label{part:guide}
+\input{chapters/user_guide}
+
+\part{Architecture}\label{part:architecture}
+\input{chapters/architecture}
+
+\part{The numerical core (C++)}\label{part:core}
+\input{chapters/core}
+
+\part{Derivations}\label{part:derivations}
+\input{chapters/derivation_es}
+\input{chapters/derivation_kf}
+\input{chapters/derivation_gp}
+\input{chapters/derivation_co}
+\input{chapters/derivation_en}
+
+\part{Application, Python bindings and packaging}\label{part:bindings}
+\input{chapters/bindings}
+\input{chapters/packaging}
+
+\part{The Python package}\label{part:python}
+\input{chapters/python}
+
+\part{Sentiment-modulated risk budgeting}\label{part:sentiment}
+\input{chapters/sentiment}
+
+\part{Verification and limitations}\label{part:verification}
+\input{chapters/verification}
+
+\appendix
+\input{chapters/glossary}
+\input{chapters/bibliography}
+
+\end{document}

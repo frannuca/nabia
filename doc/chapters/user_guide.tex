@@ -1,0 +1,144 @@
+% Part I: how to build, install and run every part of nabia.
+
+\chapter{Getting started}\label{ch:guide}
+
+\section{What is in the repository}
+\begin{center}\small
+\begin{tabularx}{\linewidth}{@{}l l X@{}}
+\toprule
+Folder & Open in & Contents \\
+\midrule
+\code{cpp/} & CLion (CMake) & the C++ library (\code{include}, \code{src}), Catch2 tests, the command-line
+  backtest, and the pybind11 bindings that build the \code{nabia\_python\_bridge} wheel \\
+\code{nabia\_python/} & PyCharm & the Python project: the \code{nabia} package (portfolio backtests, analytics,
+  market data, and the sentiment risk-budgeting pipeline \code{nabia.sentiment\_rb}), its tests, its single
+  \code{pyproject.toml} and its \code{.venv} \\
+\code{doc/} & --- & this document (\code{nabia.tex}, chapters, the snippet extractor, \code{build.sh}) and the
+  specification of the sentiment pipeline (\code{sentiment\_risk\_budgeting\_spec.md}) \\
+\code{dist/} & --- & built wheels (not versioned) \\
+\code{.github/workflows/wheels.yml} & --- & wheels for every platform in GitHub Actions \\
+\bottomrule
+\end{tabularx}
+\end{center}
+The two projects meet only through the wheel: \code{cpp/} builds \code{nabia\_python\_bridge} into
+\code{dist/}, and \code{nabia\_python/} installs it into its \code{.venv}. The order of the steps below follows
+from that.
+
+\section{Prerequisites}
+\begin{itemize}
+  \item \textbf{C++}: CMake 3.25 or newer and a C++20 compiler (Apple clang from Xcode, GCC 12+, MSVC 2022).
+        Eigen, iir1, Catch2, nlohmann/json and pybind11 are found on the system or downloaded by CMake.
+  \item \textbf{Python}: CPython 3.10--3.14, and \href{https://docs.astral.sh/uv/}{uv} to build wheels for several
+        versions. pdflatex (TeX Live, MacTeX) to build this document.
+  \item \textbf{Optional}: the GitHub CLI (\code{gh}, logged in) to download published wheels or start CI; an
+        Anthropic API key for the pipeline's \code{--live} mode.
+\end{itemize}
+
+\section{Step 1: the C++ library}
+\begin{lstlisting}[language=bash]
+cd cpp
+cmake --preset debug                    # configure (once, or after editing a CMakeLists.txt)
+cmake --build --preset debug -j         # library, tests, command-line application, C++ examples
+ctest --preset debug                    # the Catch2 suite and an end-to-end run of the application
+\end{lstlisting}
+Presets: \code{debug}, \code{release}, \code{releaseWithDebugInfo}, \code{asan} (address and undefined-behaviour
+sanitizers) and \code{python-bridge} (a development build of the bindings, \S\ref{sec:guide-debug}). In CLion,
+open \code{cpp/}; it reads \code{CMakePresets.json}: enable the \code{debug} preset and run or debug
+\code{nabia\_tests} or \code{nabia\_rb\_backtest}. The command-line backtest (Chapter~\ref{c:sec:cli}):
+\begin{lstlisting}[language=bash]
+./build/debug/apps/rb_backtest/nabia_rb_backtest --prices apps/rb_backtest/example/prices.csv \
+    --config apps/rb_backtest/example/portfolio.json --output /tmp/result.csv
+\end{lstlisting}
+
+\section{Step 2: the wheel}
+The bindings are packaged as a wheel, one per Python version (Chapter~\ref{ch:packaging} explains wheels):
+\begin{lstlisting}[language=bash]
+cpp/scripts/build_wheels.sh 3.14        # the Python version of nabia_python/.venv (no argument: 3.10-3.14)
+NABIA_WHEEL_BUILD_TYPE=RelWithDebInfo cpp/scripts/build_wheels.sh 3.14   # with debug symbols
+cpp\scripts\build_wheels.ps1 -Versions 3.12   # Windows (PowerShell): cibuildwheel, win_amd64
+\end{lstlisting}
+Each wheel is built in isolation, installed in a clean environment and tested with
+\code{nabia\_python/tests/bridge} before it is copied to \code{dist/}. Instead of building, the wheels published
+by the CI can be downloaded: \cmd|nabia_python/scripts/fetch_wheels.sh| (the newest successful run, or
+\cmd|fetch_wheels.sh release v0.1.0|).
+
+\section{Step 3: the Python project}
+\begin{lstlisting}[language=bash]
+nabia_python/scripts/setup_env.sh       # creates nabia_python/.venv: the wheel from dist/ + nabia (editable)
+cd nabia_python
+.venv/bin/python -m pytest              # the bridge tests, the package tests, the pipeline tests
+\end{lstlisting}
+\code{setup\_env.sh} (\code{setup\_env.ps1} on Windows) reinstalls the wheel every time, so run it again after
+rebuilding the C++ code; Python changes are seen at once (editable install). \code{PYTHON=python3.12} chooses the
+interpreter of a new \code{.venv}. In PyCharm, open \code{nabia\_python/} and select \code{.venv/bin/python} as the
+interpreter. The whole library is then available from Python (Chapter~\ref{c:sec:bridge}):
+\begin{lstlisting}[language=Python]
+import nabia_python_bridge as nb
+from nabia_python_bridge import frames
+
+rb = nb.risk.RiskBudgeting(nb.risk.RiskBudgetingParams(budgets=[0.5, 0.3, 0.2]), nb.risk.Volatility(cov))
+weights = rb.optimize()
+reg = frames.regress(fund_returns, factor_returns, min_factors=1, max_factors=3, train_fraction=0.7)
+\end{lstlisting}
+
+\section{Step 4: the sentiment risk-budgeting pipeline}
+From \code{nabia\_python/} (Part~\ref{part:sentiment} describes the method):
+\begin{lstlisting}[language=bash]
+.venv/bin/python -m nabia.sentiment_rb                    # long-only, offline (synthetic data, mocked LLM), ~20 s
+.venv/bin/python -m nabia.sentiment_rb --show             # also open the figures
+.venv/bin/python -m nabia.sentiment_rb --config <(echo '{"budgets": {"mode": "long_short"}}')
+.venv/bin/python -m nabia.sentiment_rb --ic-sweep 0 0.1 0.2 0.3 0.5    # alpha against news quality
+.venv/bin/python -m nabia.sentiment_rb --out output/my_run             # another output folder
+.venv/bin/nabia-sentiment --help                          # the same command, installed as a script
+\end{lstlisting}
+\begin{itemize}
+  \item \textbf{Configuration.} Every setting lives in \code{CONFIG} (\coderef{rb_config}): windows, horizon,
+        elastic-net grid, refit schedule, normalization, budget bounds, long-only/long-short, LLM models,
+        taxonomy, indicators, assets. \code{--config file.json} deep-merges overrides; long-short mode is
+        described in \S\ref{sec:rb-longshort}:
+\begin{lstlisting}
+{"normalize": {"method": "phi"}, "model": {"refit": "ME"}}
+{"budgets": {"mode": "long_short", "short_below": 0.35, "long_above": 0.5, "modulate_long_short": false}}
+\end{lstlisting}
+  \item \textbf{Live LLM}: \cmd|.venv/bin/pip install -e ".[llm]"|, set \code{ANTHROPIC\_API\_KEY}, add
+        \code{--live}: the news of the last \code{llm.live\_days} days is scored by Claude (models in
+        \code{llm.triage\_model}, \code{scoring\_model}, \code{digest\_model}); the rest stays mocked.
+  \item \textbf{Outputs}, in \code{output/sentiment\_rb} by default:
+        \begin{itemize}
+          \item tables: \code{comparison}, \code{ic}, \code{llm\_ic}, \code{snapshot}, \code{budgets}, \code{signal},
+                \code{selection\_frequency}, \code{ic\_in\_out\_of\_sample}, \code{equity}, \code{news} (CSV);
+          \item the LLM audit log \code{llm\_audit.jsonl};
+          \item figures \code{portfolio.png}, \code{budgets.png}, \code{model.png}; for a sweep,
+                \code{sweep.png} and \code{sweep.csv}.
+        \end{itemize}
+\end{itemize}
+
+\section{Debugging the C++ code from Python}\label{sec:guide-debug}
+\begin{enumerate}
+  \item Build a wheel with debug symbols (\code{NABIA\_WHEEL\_BUILD\_TYPE=RelWithDebInfo}) and run
+        \code{setup\_env.sh}; or, without a wheel, \cmd|cmake --preset python-bridge && cmake --build --preset python-bridge|
+        in \code{cpp/}, which writes the modules next to the package sources, and run the script with
+        \code{PYTHONPATH=<repository>/cpp/bindings}.
+  \item Start the script in PyCharm, stopped at a breakpoint before the C++ call.
+  \item In CLion: Run $\to$ Attach to Process, the Python process. Breakpoints in \code{cpp/src} are hit.
+\end{enumerate}
+
+\section{Wheels for every platform and releases}
+\begin{lstlisting}[language=bash]
+gh workflow run wheels.yml                          # Linux x86_64/aarch64, macOS arm64/x86_64, Windows AMD64
+gh run list --workflow wheels.yml                   # follow it
+gh run download <run-id> -n all-wheels -D dist      # every wheel and the sdist
+git tag v0.2.0 && git push origin v0.2.0            # a GitHub Release with all of them attached
+\end{lstlisting}
+Pushes to \code{main} and pull requests that change \code{cpp/} also start the workflow. Chapter~\ref{ch:packaging}
+explains every job and how to write new ones.
+
+\section{Building this document}
+\begin{lstlisting}[language=bash]
+doc/build.sh                 # doc/nabia.pdf: extracts the excerpts from the current code, runs pdflatex 3 times
+doc/build.sh --figures       # first reruns the pipeline (long-only, long-short, both sweeps) for the figures/tables
+\end{lstlisting}
+The excerpts, their file:line locations and the packaging file pieces are extracted from the repository by
+\code{doc/extract\_snippets.py}; a function that no longer exists stops the build. The figures and result tables
+of Part~\ref{part:sentiment} are copied from \code{nabia\_python/output} into \code{doc/figures} by
+\code{--figures}.

@@ -8,7 +8,7 @@ compile_commands.json
 .idea/
 dist/
 
-# Python (python/ and webui/ each have their own .venv)
+# Python (nabia_python/.venv is the project's environment)
 .venv/
 __pycache__/
 *.egg-info/
@@ -16,12 +16,10 @@ __pycache__/
 # Development build of the bindings (cmake --preset python-bridge in cpp/)
 cpp/bindings/nabia_python_bridge/_*.so
 cpp/bindings/nabia_python_bridge/_*.pyd
-python/examples/.data/
-python/examples/figures/
+# Pipeline results (python -m nabia.sentiment_rb)
+nabia_python/output/
+nabia_python/wheels.tmp/
 
-# Local market data databases (data/market.db is shared by python/ and webui/)
+# Local market data databases
 *.db
 *.sqlite
-# Agent scratch directory (config copy for the MCP servers) and web app log
-.nabia_ai/
-.nabia_web.log

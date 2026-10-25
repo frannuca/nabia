@@ -1,0 +1,677 @@
+\chapter{Elastic net factor regression: derivations}\label{ch:en}
+
+This note documents the regression module of \code{nabia}: the elastic net solver
+(\code{ElasticNet}) and the \code{RegressionEngine}. The engine regresses a target series on a set of candidate factors.
+It chooses how many factors to use and which ones, the penalty $\lambda$ and the mix
+$\alpha$, and measures the uncertainty of the result.
+
+We first derive the elastic net from its optimality conditions:
+\begin{itemize}
+  \item the coordinate descent update and soft thresholding;
+  \item the smallest penalty that zeroes every coefficient, $\lambda_{\max}$;
+  \item the role of the intercept and of standardization;
+  \item the grouping effect that makes the elastic net stable with correlated factors;
+  \item the effective degrees of freedom.
+\end{itemize}
+We then describe the engine:
+\begin{itemize}
+  \item the chronological train/test split;
+  \item time-series cross-validation (blocked $K$-fold and walk-forward, with a gap);
+  \item the one-standard-error rule;
+  \item the in-sample criteria (BIC, AIC) used when there is no test set;
+  \item exhaustive and forward subset search;
+  \item the moving block bootstrap.
+\end{itemize}
+The last sections map each step to the code, show how to use it from C++ and from Python,
+and list the tests and the limitations.
+
+
+
+
+%==============================================================================
+\section{Problem and notation}
+
+We observe a target $y_t$ (for example a fund's daily return) and $N$ candidate factors
+$x_{t1},\dots,x_{tN}$ (market, rate, commodity returns) for $t=1,\dots,T$, in time order.
+We look for a sparse linear model
+\[
+  y_t = b_0 + \sum_{j\in S} b_j x_{tj} + \varepsilon_t,\qquad S\subseteq\{1,\dots,N\},\quad
+  k_{\min}\le|S|\le k_{\max},
+\]
+that \emph{extrapolates}, that is, predicts $y$ well on dates after those used to fit it.
+When only in-sample explanation is wanted, the same machinery chooses the model by an
+information criterion instead.
+
+Throughout, $X\in\R^{n\times p}$ is the design of the rows and columns at hand (a training
+window, a fold, a subset), $x_j$ its $j$-th column, $\norm{\cdot}$ the Euclidean norm and
+$\sth(z,t)=\operatorname{sign}(z)\max(|z|-t,0)$ the soft-thresholding operator.
+
+%==============================================================================
+\section{The elastic net}
+
+\subsection{Objective}
+For $\lambda\ge0$ and $\alpha\in[0,1]$, the elastic net in the glmnet parametrization
+solves
+\begin{equation}\label{en:eq:enet}
+  \min_{b_0,\,b}\;
+  \underbrace{\frac{1}{2n}\norm{y-b_0\mathbf 1-Xb}^2}_{\text{fit}}
+  +\lambda\Big(\alpha\norm{b}_1+\frac{1-\alpha}{2}\norm{b}_2^2\Big).
+\end{equation}
+\begin{itemize}
+  \item $\alpha=1$ is the \emph{lasso}: the $\ell_1$ penalty sets coefficients exactly to
+        zero, so it selects factors.
+  \item $\alpha=0$ is \emph{ridge} regression: the $\ell_2$ penalty shrinks coefficients
+        but never zeroes them.
+  \item $\lambda=0$ is ordinary least squares.
+\end{itemize}
+We write $\ell_1=\lambda\alpha$ and $\ell_2=\lambda(1-\alpha)$ for the two penalty weights.
+The intercept is never penalized.
+
+\subsection{Intercept and standardization}\label{en:sec:standardize}
+
+\begin{proposition}[Intercept]\label{en:prop:intercept}
+For any $b$, the optimal intercept in \eqref{en:eq:enet} is $b_0=\bar y-\bar x^\T b$, where
+$\bar y$ and $\bar x$ are the means of $y$ and of the columns of $X$. Substituting it
+leaves problem \eqref{en:eq:enet} without intercept on the centred data
+$\tilde y=y-\bar y\mathbf 1$, $\tilde X=X-\mathbf 1\bar x^\T$.
+\end{proposition}
+\begin{proof}
+The objective is a convex quadratic in $b_0$ with derivative
+$-\frac1n\mathbf 1^\T(y-b_0\mathbf 1-Xb)=-(\bar y-b_0-\bar x^\T b)$, which vanishes at the stated
+value. Then $y-b_0\mathbf 1-Xb=\tilde y-\tilde Xb$.
+\end{proof}
+
+\paragraph{Standardization.} Write $s_j^2=\frac1n\norm{\tilde x_j}^2$ (the population variance
+of factor $j$). With \code{standardize}, the solver works on $z_j=\tilde x_j/s_j$ and finds
+coefficients $\beta_j$ for those columns. The coefficients in original units are
+\[
+  b_j=\beta_j/s_j,\qquad b_0=\bar y-\bar x^\T b.
+\]
+Equivalently, the penalty in original units is
+$\lambda\big(\alpha\sum_js_j|b_j|+\tfrac{1-\alpha}2\sum_js_j^2b_j^2\big)$: each factor is
+charged in proportion to its volatility. A factor's units, or its leverage (a 2x version of
+an index), therefore do not change whether it is selected. Without \code{standardize}, the
+penalty applies to $b$ directly.
+
+\paragraph{Constant factors.} A column whose centred mean square is below
+$10^{-24}\max(1,\frac1n\norm{x_j}^2)$ is constant up to rounding. It is set to zero, and its
+coefficient is fixed at $0$. The relative threshold is needed because centring a constant
+column leaves rounding noise of the size of its magnitude.
+
+In the working units, let $v_j=\frac1n\norm{z_j}^2$. Then $v_j=1$ with standardization,
+$v_j=s_j^2$ without it, and $v_j=0$ for a constant column. The problem the solver works on is
+\begin{equation}\label{en:eq:working}
+  \min_\beta\;F(\beta)=\frac1{2n}\norm{\tilde y-Z\beta}^2+\ell_1\norm\beta_1+\frac{\ell_2}2\norm\beta_2^2 .
+\end{equation}
+
+\subsection{Optimality conditions}
+
+$F$ is convex, as the sum of a convex quadratic and two norms. With $\ell_2>0$ it is
+strictly convex, so the minimizer is unique. A point $\beta$ minimizes $F$ if and only if
+$0\in\partial F(\beta)$, that is, with residual $r=\tilde y-Z\beta$:
+\begin{equation}\label{en:eq:kkt}
+  \frac1n z_j^\T r-\ell_2\beta_j
+  \begin{cases}
+    =\ell_1\operatorname{sign}(\beta_j) & \beta_j\ne0,\\
+    \in[-\ell_1,\ell_1] & \beta_j=0.
+  \end{cases}
+\end{equation}
+An active factor has its correlation with the residual pinned at $\pm\ell_1$, after the
+ridge shrinkage. An inactive factor has a correlation with the residual below the
+threshold. The tests check \eqref{en:eq:kkt} directly on solutions.
+
+\subsection{The coordinate update}
+
+\begin{proposition}[Soft thresholding]\label{en:prop:cd}
+Fix every coefficient but $\beta_j$, with $v_j>0$, and let $r$ be the current residual. The
+minimizer of $F$ over $\beta_j$ is
+\[
+  \beta_j^{\text{new}}=\frac{\sth(\rho_j,\ell_1)}{v_j+\ell_2},\qquad
+  \rho_j=\frac1n z_j^\T r+v_j\beta_j^{\text{old}}.
+\]
+\end{proposition}
+\begin{proof}
+Let $r^{(j)}=r+z_j\beta_j^{\text{old}}$ be the partial residual, the residual without factor
+$j$. As a function of $\beta_j$, up to constants,
+\[
+  F=\frac1{2n}\norm{r^{(j)}-z_j\beta_j}^2+\ell_1|\beta_j|+\frac{\ell_2}2\beta_j^2
+   =\frac{v_j+\ell_2}{2}\beta_j^2-\rho_j\beta_j+\ell_1|\beta_j|+\text{const},
+\]
+because $\frac1nz_j^\T r^{(j)}=\frac1nz_j^\T r+v_j\beta_j^{\text{old}}=\rho_j$. This is a scalar problem
+$\min_u\frac a2u^2-\rho u+\ell_1|u|$ with $a>0$. Its subgradient condition is
+$au-\rho+\ell_1\partial|u|\ni0$:
+\begin{itemize}
+  \item if $u>0$, then $u=(\rho-\ell_1)/a$, which needs $\rho>\ell_1$;
+  \item if $u<0$, then $u=(\rho+\ell_1)/a$, which needs $\rho<-\ell_1$;
+  \item otherwise $u=0$ is optimal, because $|\rho|\le\ell_1$ means $0\in-\rho+[-\ell_1,\ell_1]$.
+\end{itemize}
+In every case $u=\sth(\rho,\ell_1)/a$.
+\end{proof}
+
+After the update the residual is corrected in $O(n)$: $r\leftarrow r-z_j(\beta_j^{\text{new}}-\beta_j^{\text{old}})$.
+A sweep over all factors costs $O(np)$, and no matrix is ever formed or inverted.
+
+\paragraph{Convergence.} The non-smooth part of $F$ is separable across coordinates, and the
+smooth part is a convex quadratic. Cyclic coordinate descent therefore converges to a
+minimizer (Tseng, 2001). Each update cannot increase $F$, because it minimizes $F$
+exactly along one coordinate.
+
+\paragraph{Stopping rule.} A change $\Delta_j$ of coordinate $j$ moves the fitted values by
+$z_j\Delta_j$, whose mean square is $v_j\Delta_j^2$. The solver stops when, over a full
+sweep,
+\[
+  \max_jv_j\Delta_j^2<\tau\cdot\tfrac1n\norm{\tilde y}^2,
+\]
+that is, when no coordinate moves the fit by more than a fraction $\tau$ (\code{tolerance},
+default $10^{-7}$) of the target's variance. The rule is the same in standardized and in
+raw units, and does not depend on the scale of $y$.
+
+\paragraph{Active-set iterations.} After a full sweep, the solver sweeps only the non-zero
+coefficients until they settle. Then it checks with a new full sweep. It stops when a
+\emph{full} sweep meets the rule, so a factor that should enter is never missed. Inactive
+factors usually stay at zero, so most sweeps cost $O(n|A|)$ instead of $O(np)$.
+
+\subsection{The smallest penalty that zeroes everything}
+
+\begin{proposition}[$\lambda_{\max}$]\label{en:prop:lmax}
+For $\alpha>0$, $\beta=0$ solves \eqref{en:eq:working} if and only if
+\[
+  \lambda\ge\lambda_{\max}=\frac{\max_j|z_j^\T\tilde y|/n}{\alpha}.
+\]
+\end{proposition}
+\begin{proof}
+At $\beta=0$, $r=\tilde y$ and every coefficient is inactive. By \eqref{en:eq:kkt}, $0$ is optimal
+if and only if $|\frac1nz_j^\T\tilde y|\le\ell_1=\lambda\alpha$ for every $j$.
+\end{proof}
+For ridge ($\alpha=0$) no finite $\lambda$ zeroes the coefficients. As in glmnet, $\alpha$ is
+floored at $10^{-3}$ in this formula, so ridge also gets a finite path that starts strongly
+shrunk.
+
+The code computes $\lambda_{\max}$ with the same arithmetic as the first coordinate update
+and multiplies it by $1+10^{-12}$. Without that factor, rounding in the division can leave
+$\lambda\alpha$ a few ulps below $|\rho_j|$, which leaves a coefficient of order $10^{-17}$
+instead of an exact zero.
+
+\subsection{Lambda grid and warm starts}
+The automatic grid has $L$ (\code{n\_lambdas}) values, log-spaced from $\lambda_{\max}$ down to
+$r\lambda_{\max}$ (\code{lambda\_min\_ratio}):
+\[
+  \lambda_i=\lambda_{\max}\,r^{\,i/(L-1)},\qquad i=0,\dots,L-1 .
+\]
+The path is solved in this decreasing order, and each solution starts from the previous one
+(a \emph{warm start}). The first solution is $\beta=0$ exactly. Each later solution is close
+to the previous one, so it takes a few sweeps. A user-supplied grid is sorted in decreasing
+order for the same reason.
+
+\subsection{Grouping effect: why the elastic net for correlated factors}
+
+The lasso picks one factor out of a group of highly correlated ones, somewhat arbitrarily,
+and may switch between them from sample to sample. The ridge term stops this.
+
+\begin{proposition}[Grouping]\label{en:prop:grouping}
+Let the factors be standardized ($\frac1n\norm{z_j}^2=1$), let $\ell_2>0$, and let factors $i,j$
+have correlation $\rho_{ij}$ and coefficients of the same sign. Then
+\[
+  |\beta_i-\beta_j|\le\frac{\norm{\tilde y}}{\sqrt n\,\ell_2}\sqrt{2(1-\rho_{ij})}.
+\]
+\end{proposition}
+\begin{proof}
+Both coefficients satisfy \eqref{en:eq:kkt} with the same sign $s$:
+$\frac1nz_i^\T r-\ell_2\beta_i=\ell_1s=\frac1nz_j^\T r-\ell_2\beta_j$. Hence
+$\ell_2(\beta_i-\beta_j)=\frac1n(z_i-z_j)^\T r$, and by Cauchy--Schwarz
+$|\beta_i-\beta_j|\le\frac1{n\ell_2}\norm{z_i-z_j}\norm r$. Here
+$\norm{z_i-z_j}^2=2n(1-\rho_{ij})$. Also $F(\hat\beta)\le F(0)$ gives
+$\norm r\le\norm{\tilde y}$.
+\end{proof}
+As $\rho_{ij}\to1$, the two coefficients are forced together, and they share the loading
+instead of one taking it all. In the factor replication example (S\&P 500 against Nasdaq
+100, correlation $0.93$), $\alpha<1$ keeps the split stable across bootstrap samples.
+
+\subsection{Effective degrees of freedom}\label{en:sec:df}
+
+The information criteria of \S\ref{en:sec:insample} need the number of parameters an elastic net
+fit really uses. Penalized coefficients count for less than one.
+
+\begin{proposition}[Degrees of freedom]\label{en:prop:df}
+Let $A$ be the active set of the solution and $Z_A$ its columns. For a $y$ at which the
+active set and the signs are locally constant,
+\[
+  \mathrm{df}=\mathbb 1[\text{intercept}]+\tr\!\big(Z_A(Z_A^\T Z_A+n\ell_2I)^{-1}Z_A^\T\big)
+  =\mathbb 1[\text{intercept}]+\sum_i\frac{d_i}{d_i+n\ell_2},
+\]
+where the $d_i$ are the eigenvalues of $Z_A^\T Z_A$.
+\end{proposition}
+\begin{proof}
+For a fit $\hat y=g(y)$, Stein's lemma gives the unbiased degrees of freedom
+$\mathrm{df}=\sum_t\partial\hat y_t/\partial y_t=\tr(\partial g/\partial y)$ (Efron, 2004). On the active set, \eqref{en:eq:kkt} with fixed signs $s_A$ reads
+$\frac1nZ_A^\T(\tilde y-Z_A\beta_A)-\ell_2\beta_A=\ell_1s_A$, so
+\[
+  \beta_A=(Z_A^\T Z_A+n\ell_2I)^{-1}(Z_A^\T\tilde y-n\ell_1s_A).
+\]
+The second term does not depend on $y$ locally. Hence
+$\partial(Z_A\beta_A)/\partial\tilde y=H=Z_A(Z_A^\T Z_A+n\ell_2I)^{-1}Z_A^\T$. With an intercept,
+$\hat y=\bar y\mathbf 1+Z_A\beta_A$ and $\tilde y=(I-\frac1n\mathbf 1\mathbf 1^\T)y$. The centred columns are
+orthogonal to $\mathbf 1$, so the trace is $1+\tr H$. Diagonalizing $Z_A^\T Z_A=UDU^\T$ gives
+$\tr H=\tr\big(D(D+n\ell_2I)^{-1}\big)$.
+\end{proof}
+Special cases:
+\begin{itemize}
+  \item the lasso ($\ell_2=0$) with $Z_A$ of full rank gives $\mathrm{df}=|A|$ (+1), the
+        result of Zou, Hastie and Tibshirani (2007);
+  \item ridge gives the familiar $\sum d_i/(d_i+n\ell_2)$;
+  \item OLS gives the number of columns.
+\end{itemize}
+Eigenvalues below $10^{-10}\max_id_i$ are treated as zero, which handles a rank-deficient
+active set.
+
+%==============================================================================
+\section{The regression engine}
+
+\subsection{Overview}
+Given $y\in\R^T$, $X\in\R^{T\times N}$ and the parameters, the engine runs these steps:
+\begin{enumerate}
+  \item \textbf{Split} the rows in time order into training and test sets (\S\ref{en:sec:split}).
+  \item For every candidate subset $S$ (\S\ref{en:sec:search}):
+  \begin{enumerate}
+    \item choose $(\alpha,\lambda)$ by time-series cross-validation on the training rows
+          (\S\ref{en:sec:cv});
+    \item fit the elastic net on all training rows at that $(\alpha,\lambda)$;
+    \item score it by the test MSE, or by an in-sample criterion when there is no test set
+          (\S\ref{en:sec:scores}).
+  \end{enumerate}
+  \item \textbf{Keep} the subset with the lowest score. Optionally refit it on every row
+        (\S\ref{en:sec:refit}) and bootstrap it (\S\ref{en:sec:bootstrap}).
+\end{enumerate}
+
+\subsection{Chronological split}\label{en:sec:split}
+The training set is the first
+\[
+  n=\min\big(T,\lfloor fT+10^{-9}\rfloor\big)
+\]
+rows, with $f$ = \code{train\_fraction}. The test set is the remaining $T-n$ rows. The
+$10^{-9}$ makes $0.7\times10$ count as 7 despite rounding. Rows are never shuffled.
+\begin{itemize}
+  \item The test set lies after every training row, so its error measures
+        \emph{extrapolation}: the model faces a period it has never seen, with its own
+        regimes and correlations.
+  \item With $f=1$ there is no test set, and the engine works \emph{in sample}: subsets are
+        compared by \code{in\_sample\_criterion}.
+\end{itemize}
+
+\subsection{\texorpdfstring{Choosing $\lambda$ and $\alpha$}{Choosing lambda and alpha}: time-series cross-validation}\label{en:sec:cv}
+
+\paragraph{Grid.} For each $\alpha_a$ of \code{alphas}, the engine builds a $\lambda$ grid
+$\lambda_{a,0}>\dots>\lambda_{a,L-1}$. It is the automatic grid from $\lambda_{\max}$ of the
+subset's training rows, or the user's \code{lambdas}. The grid differs by $\alpha$, because
+$\lambda_{\max}\propto1/\alpha$, so cells are compared by position. If the grid has a single
+point, there is nothing to choose, and cross-validation is skipped.
+
+\paragraph{Folds.} The $n$ training rows are cut into contiguous blocks with boundaries
+$\lfloor kn/B\rfloor$. With gap $g$ (\code{validation\_gap}):
+\begin{description}
+  \item[Blocked $K$-fold] ($B=K$ blocks). Fold $k$ validates on block $k$ and trains on every
+        row before the block minus $g$, and every row after it plus $g$.
+  \item[Walk-forward] ($B=K+1$ blocks). Fold $k=1,\dots,K$ validates on block $k$ and trains on
+        the rows before it minus $g$. Training always precedes validation, as in live use.
+        The cost is smaller training sets in the first folds.
+\end{description}
+The gap removes the rows next to the validation block from training. Returns are serially
+dependent, through overlapping horizons or volatility clustering, so a training row adjacent
+to a validation row leaks information about it. A fold with no validation rows, or with fewer
+than 2 training rows, is an error.
+
+\paragraph{Estimate and standard error.} For every fold $k$ and grid cell $(a,i)$, the path for
+$\alpha_a$ is fitted on the fold's training rows. Its validation MSE is $m_k(a,i)$. With $K$
+folds:
+\[
+  \mathrm{CV}(a,i)=\frac1K\sum_km_k(a,i),\qquad
+  \mathrm{SE}(a,i)=\sqrt{\frac{1}{K}\cdot\frac{1}{K-1}\sum_k\big(m_k(a,i)-\mathrm{CV}(a,i)\big)^2}.
+\]
+These are the mean of the fold errors and its standard error, treating the folds as
+independent replicates. The chosen cell is $(a^\ast,i^\ast)=\argmin\mathrm{CV}$, with ties going
+to the first cell, so the result is deterministic.
+
+\paragraph{One-standard-error rule.} With \code{one\_standard\_error\_rule}, the engine stays
+on row $a^\ast$ and takes the \emph{largest} $\lambda$ whose error is within one standard error
+of the minimum:
+\[
+  i^{\ast\ast}=\min\{\,i\le i^\ast:\ \mathrm{CV}(a^\ast,i)\le\mathrm{CV}(a^\ast,i^\ast)+\mathrm{SE}(a^\ast,i^\ast)\,\}.
+\]
+The CV minimum is a noisy estimate. A model that is statistically as good but more strongly
+penalized (sparser, more stable) is preferred (Hastie, Tibshirani and Friedman, 2009, \S7.10).
+
+\paragraph{Final fit of the subset.} The subset is refitted on all $n$ training rows along the
+grid of $\alpha_{a^\ast}$, from $\lambda_{a^\ast,0}$ down to the chosen value. This warm-starts it
+exactly as during validation.
+
+\subsection{Scores}\label{en:sec:scores}
+
+\paragraph{Out of sample} ($T>n$). The score is the test MSE,
+$\frac1{T-n}\sum_{t>n}(y_t-\hat y_t)^2$. The engine also reports the test $R^2$:
+\[
+  R^2_{\text{test}}=1-\frac{\sum_{t>n}(y_t-\hat y_t)^2}{\sum_{t>n}(y_t-\bar y_{\text{train}})^2}.
+\]
+It is measured against the \emph{training} mean, the forecast available without the model
+(Campbell and Thompson, 2008). It is negative when the model does worse than that mean.
+
+\paragraph{In sample} ($T=n$). \label{en:sec:insample}
+The score is an information criterion on the training rows. Under Gaussian errors, the
+log-likelihood maximized over the noise variance is
+$-2\log\hat L=n\log(2\pi\,\mathrm{MSE})+n$. Dropping the constants, which are the same for
+every model:
+\[
+  \mathrm{BIC}=n\log\mathrm{MSE}+\mathrm{df}\log n,\qquad
+  \mathrm{AIC}=n\log\mathrm{MSE}+2\,\mathrm{df},
+\]
+with the effective df of Proposition~\ref{en:prop:df}.
+\begin{itemize}
+  \item BIC is consistent: with a true sparse model it selects it with probability
+        $\to1$.
+  \item AIC targets prediction error and admits more factors.
+  \item \code{MSE} alone never pays for a factor. Among nested least-squares fits it always
+        prefers the largest subset. It is there for comparison.
+\end{itemize}
+
+\subsection{Subset search}\label{en:sec:search}
+
+With $k_{\min}$ = \code{min\_factors} and $k_{\max}$ = \code{max\_factors} ($0$ meaning $N$):
+\begin{description}
+  \item[Exhaustive] evaluates every subset of each size, in lexicographic order, which is
+        $\sum_{k=k_{\min}}^{k_{\max}}\binom Nk$ subsets. For each size it keeps the subset with
+        the lowest score. For example, $N=14$ and sizes 1--4 give $14+91+364+1001=1470$
+        subsets.
+  \item[Forward] is greedy. Starting from the empty set, step $k=1,\dots,k_{\max}$ adds the
+        remaining factor whose addition gives the lowest score. That costs
+        $\sum_{k=1}^{k_{\max}}(N-k+1)$ evaluations, which is linear in $N$ for a fixed
+        $k_{\max}$. The best subset of size $k$ is recorded for $k\ge k_{\min}$. Forward
+        search can miss the best subset when factors only help together, but it reaches it
+        in the common case of nested good models.
+  \item[Auto] uses Exhaustive if the count above is at most \code{max\_exhaustive\_subsets}
+        (default 10\,000), and Forward otherwise. The count is computed in floating point and
+        saturates, so it never overflows.
+\end{description}
+The selected model is the best of the per-size winners (\code{best\_by\_size}), by score. Every
+evaluation is independent, so the subsets of one size (exhaustive) or one step (forward) are
+evaluated in parallel (\S\ref{en:sec:parallel}).
+
+\begin{remark}[Selection on the test set]
+Choosing among many subsets by their test error makes the winner's test error an
+\emph{optimistic} estimate of its error on new data, because the minimum of many noisy
+errors is biased down. A factor can win by noise. The bootstrap of \S\ref{en:sec:bootstrap}
+helps detect this: a spurious factor's interval contains zero. For a clean final number,
+keep a later period out of the engine entirely.
+\end{remark}
+
+\subsection{Refit on the full sample}\label{en:sec:refit}
+With \code{refit\_on\_full\_sample} and a test set, the chosen factors are refitted on all $T$
+rows at the chosen $(\alpha,\lambda)$. The reported coefficients and intercept are then the
+refit, which uses the most recent data. The predictions, residuals and scores remain those of
+the training-rows model, so the test rows stay out of sample.
+
+\subsection{Moving block bootstrap}\label{en:sec:bootstrap}
+
+With $B$ = \code{bootstrap\_samples} $>0$, the engine estimates the sampling distribution of
+the selected model's coefficients. Each sample $b=1,\dots,B$:
+\begin{enumerate}
+  \item draws block starts $s$ uniformly in $\{0,\dots,n-\ell\}$, with $\ell$ =
+        \code{bootstrap\_block\_size} $\le n$, and concatenates the blocks of rows
+        $s,\dots,s+\ell-1$ until there are $n$ rows (the last block is truncated);
+  \item refits the elastic net on those rows, for the selected factors, at the selected
+        $(\alpha,\lambda)$;
+  \item records the coefficients, the intercept and the MSE of that model on the test rows.
+\end{enumerate}
+With $\ell=1$ this is the ordinary i.i.d.\ bootstrap. Daily returns are not independent:
+their volatility clusters. Blocks keep the dependence within $\ell$ consecutive rows, and the
+moving block bootstrap is consistent for weakly dependent series when
+$\ell\to\infty$ and $\ell/n\to0$ (K\"unsch, 1989). A block of about a month (20 rows) is a
+reasonable choice for daily data.
+
+\paragraph{Summaries.} For each selected factor, with draws $c_1,\dots,c_B$:
+\begin{itemize}
+  \item the mean, and the standard error $\sqrt{\frac1{B-1}\sum_b(c_b-\bar c)^2}$;
+  \item the percentile interval at level $\gamma$ (\code{confidence\_level}): the empirical
+        quantiles at $q=(1-\gamma)/2$ and $1-q$. With the sorted draws $c_{(0)}\le\dots\le
+        c_{(B-1)}$, the quantile at $q$ interpolates linearly at position $q(B-1)$;
+  \item the \emph{selection frequency}, the fraction of samples with $c_b\ne0$. It is
+        meaningful for $\alpha>0$; for ridge every coefficient is non-zero, so it is always
+        1;
+  \item the intercept's mean and standard error, and the mean and percentile interval of
+        the test MSE.
+\end{itemize}
+
+\paragraph{What the bootstrap does not cover.} The resamples refit the \emph{selected} subset
+at the \emph{selected} $(\alpha,\lambda)$. The intervals are conditional on that choice: they
+measure estimation noise, not the uncertainty of selecting the factors. Redoing the whole
+search on every resample would cost $B$ times the search.
+
+\paragraph{Reproducibility.} Sample $b$ uses its own Mersenne Twister, seeded with
+\code{std::seed\_seq} from the 64-bit \code{bootstrap\_seed} and $b$. The draws do not depend
+on which thread runs which sample.
+
+\subsection{Parallelism and determinism}\label{en:sec:parallel}
+Subset evaluations and bootstrap samples run on \code{nabia::detail::parallel\_for} with
+\code{num\_threads} threads (0 = all cores). Every task writes only its own slot. Selections
+use a sequential argmin with first-index tie-breaking, and random draws are seeded per
+sample. Results are therefore bit-identical for every thread count, and a test checks this.
+
+\subsection{Complexity}
+One elastic net fit along an $L$-point path costs about $O(\text{sweeps}\cdot n|S|)$. One
+subset evaluation costs $|\text{alphas}|\times(K+1)$ path fits. The search multiplies that by
+the number of subsets, and the bootstrap adds $B$ single fits. In the factor replication
+example (14 factors, sizes 1--4 exhaustive, 3 alphas $\times$ 30 lambdas, 5 folds, about
+2\,600 training rows, 500 bootstrap samples), the whole example script, with its other
+variants, runs in about 4\,s on a laptop.
+
+%==============================================================================
+\section{Implementation}
+
+\subsection{Code map}
+Paths are relative to the C++ project, \code{cpp/}.
+\begin{center}\small
+\begin{tabularx}{\linewidth}{@{}l X@{}}
+\toprule
+Concept & Code \\
+\midrule
+Parameters, fit, class & \nolinkurl{include/nabia/regression/ElasticNet.h}: \code{ElasticNetParams}, \code{ElasticNetFit}, \code{ElasticNet} \\
+Centring, scaling (\S\ref{en:sec:standardize}) & \nolinkurl{src/regression/ElasticNet.cpp}: \code{standardize\_data} \\
+Coordinate descent (Prop.~\ref{en:prop:cd}) & \code{CoordinateDescent::solve}, \code{CoordinateDescent::sweep}, \code{soft\_threshold} \\
+$\lambda_{\max}$, grid (Prop.~\ref{en:prop:lmax}) & \code{nabia::regression::lambda\_max}, \code{lambda\_grid} \\
+Path and warm starts & \code{nabia::regression::elastic\_net\_path} \\
+Degrees of freedom (Prop.~\ref{en:prop:df}) & \code{degrees\_of\_freedom} \\
+Back to original units & \code{make\_fit} \\
+Engine parameters and results & \nolinkurl{include/nabia/regression/RegressionEngine.h} \\
+Split, search, final model & \nolinkurl{src/regression/RegressionEngine.cpp}: \code{run\_regression\_engine} \\
+Folds (\S\ref{en:sec:cv}) & \code{make\_folds} \\
+CV, 1-SE rule, scores & \code{evaluate}, \code{in\_sample\_criterion}, \code{r\_squared} \\
+Subset search (\S\ref{en:sec:search}) & \code{exhaustive\_search}, \code{forward\_search}, \code{count\_subsets} \\
+Bootstrap (\S\ref{en:sec:bootstrap}) & \code{bootstrap}, \code{percentile} \\
+Python bindings & \nolinkurl{bindings/src/bind_regression.cpp} \\
+pandas interface & \nolinkurl{bindings/nabia_python_bridge/frames.py}: \code{regress} \\
+Tests & \nolinkurl{tests/test_regression.cpp}, \nolinkurl{../nabia_python/tests/bridge/test_regression.py} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Parameters}
+\begin{center}\small
+\begin{tabularx}{\linewidth}{@{}l l X@{}}
+\toprule
+Field (\code{RegressionEngineParams}) & Default & Meaning \\
+\midrule
+\code{min\_factors}, \code{max\_factors} & 1, 0 & subset sizes $k_{\min}..k_{\max}$; $k_{\max}=0$ means all \\
+\code{search} & \code{Auto} & \code{Exhaustive}, \code{Forward} or \code{Auto} \\
+\code{max\_exhaustive\_subsets} & 10\,000 & Auto: largest exhaustive search \\
+\code{train\_fraction} & 0.7 & $f$; 1 = in sample \\
+\code{in\_sample\_criterion} & \code{BIC} & \code{BIC}, \code{AIC} or \code{MSE} (when $f=1$) \\
+\code{refit\_on\_full\_sample} & false & report coefficients refitted on all rows \\
+\code{alphas} & 0, .25, .5, .75, 1 & mixes $\alpha$ to try \\
+\code{lambdas} & empty & fixed grid; empty = automatic \\
+\code{n\_lambdas}, \code{lambda\_min\_ratio} & 50, $10^{-3}$ & automatic grid \\
+\code{validation} & \code{BlockedKFold} & or \code{WalkForward} \\
+\code{validation\_folds}, \code{validation\_gap} & 5, 0 & $K$ and $g$ \\
+\code{one\_standard\_error\_rule} & false & sparser model within 1 SE \\
+\code{bootstrap\_samples}, \code{bootstrap\_block\_size} & 0, 1 & $B$ (0 = off) and $\ell$ \\
+\code{confidence\_level}, \code{bootstrap\_seed} & 0.95, 42 & intervals and seed \\
+\code{fit\_intercept}, \code{standardize} & true, true & see \S\ref{en:sec:standardize} \\
+\code{tolerance}, \code{max\_iter} & $10^{-7}$, $10^5$ & solver stopping rule and sweep cap \\
+\code{num\_threads} & 0 & 0 = all cores \\
+\bottomrule
+\end{tabularx}
+\end{center}
+Invalid values throw \code{std::invalid\_argument} at construction, with a message naming the
+field. Python raises \code{ValueError}.
+
+\subsection{Usage from C++}
+\begin{lstlisting}
+#include "nabia/regression/RegressionEngine.h"
+
+auto params = std::make_unique<RegressionEngineParams>();
+params->min_factors = 1;
+params->max_factors = 4;
+params->search = SubsetSearch::Exhaustive;
+params->train_fraction = 0.7;                // last 30% of the rows out of sample
+params->alphas = {0.0, 0.5, 1.0};
+params->n_lambdas = 30;
+params->validation = ValidationScheme::BlockedKFold;
+params->bootstrap_samples = 500;
+params->bootstrap_block_size = 20;           // keep about a month of dependence
+
+RegressionEngine engine(std::move(params));
+// Index-free: y is T, X is T x N (rows = time), names optional.
+RegressionComputation r = engine.run(y, X, names);
+r.factor_names; r.coefficients; r.alpha; r.lambda;  // the selected model
+r.best.test_r2; r.bootstrap->lower; r.bootstrap->upper;
+
+// With an index: target and factors must share it (align with drop_missing first).
+RegressionResult<Date> rr = engine.run(target_series, factor_frame);
+rr.predictions; rr.residuals; rr.test_start;
+
+// A single elastic net, or a whole path.
+ElasticNet en(std::make_unique<ElasticNetParams>(ElasticNetParams{.lambda = 1e-4, .alpha = 0.5}));
+en.fit(X, y);
+const ElasticNetFit& fit = en.result();      // coefficients in original units
+auto grid = nabia::regression::lambda_grid(nabia::regression::lambda_max(X, y, 1.0), 60, 1e-4);
+auto path = nabia::regression::elastic_net_path(X, y, ElasticNetParams{.alpha = 1.0}, grid);
+\end{lstlisting}
+
+\subsection{Usage from Python}
+The module \code{nabia\_python\_bridge.regression} exposes the same classes, with
+\code{lambda} spelled \code{lambda\_}. Arrays are \code{float64} numpy arrays, and the
+computation runs with the GIL released. \code{frames.regress} adds pandas alignment and
+labels:
+\begin{lstlisting}[language=Python]
+import numpy as np
+from nabia_python_bridge import regression, frames
+
+# numpy: y (T,), X (T, N)
+r = regression.RegressionEngine(min_factors=1, max_factors=4, train_fraction=0.7,
+                                search=regression.SubsetSearch.Exhaustive,
+                                alphas=[0.0, 0.5, 1.0], n_lambdas=30,
+                                bootstrap_samples=500, bootstrap_block_size=20).run(y, X, names)
+r.factor_names, r.coefficients, r.alpha, r.lambda_
+r.best.test_r2, r.validation_curve.mse, r.bootstrap.lower, r.bootstrap.upper
+
+# In sample, chosen by BIC
+regression.RegressionEngine(max_factors=5, train_fraction=1.0,
+                            in_sample_criterion=regression.InSampleCriterion.BIC).run(y, X, names)
+
+# pandas: aligned on the common index, rows with a missing value dropped
+out = frames.regress(fund_returns, factor_returns, min_factors=1, max_factors=4,
+                     validation="WalkForward", bootstrap_samples=500, bootstrap_block_size=20)
+out.coefficients        # Series indexed by factor name
+out.bootstrap           # DataFrame: mean, std_error, lower, upper, selection_frequency
+out.best_by_size        # DataFrame: one row per subset size
+out.predictions, out.residuals, out.test_start
+
+# The elastic net itself
+lmax = regression.lambda_max(X, y, alpha=1.0)
+path = regression.elastic_net_path(X, y, regression.ElasticNetParams(alpha=1.0),
+                                   regression.lambda_grid(lmax, 60, 1e-4))
+\end{lstlisting}
+
+\subsection{Worked example: recovering a known factor mix}
+A former example of the project (factor replication, since removed) built a ``fund'' from real daily returns
+(2012--2026):
+\[
+  \text{fund}_t=0.0001+0.50\,\text{NDX}_t+0.30\,\text{Gold}_t+0.20\,\text{10y}_t+\varepsilon_t,
+  \qquad\varepsilon_t\sim\N\big(0,(0.02/\sqrt{252})^2\big).
+\]
+It then lets the engine choose 1 to 4 factors out of 14 candidates. The candidates include
+close substitutes: the S\&P 500 ($\rho=0.93$ with the Nasdaq), silver, and 5y/30y bonds.
+With a 70/30 split, 3 alphas, 30 lambdas, 5 blocked folds and 500 bootstrap samples in
+20-day blocks:
+\begin{center}\small
+\begin{tabular}{@{}lccc@{}}
+\toprule
+Factor & True & Estimate & 95\% bootstrap interval \\
+\midrule
+Nasdaq 100 & 0.50 & 0.497 & [0.493, 0.500] \\
+Gold & 0.30 & 0.300 & [0.295, 0.305] \\
+10y notes & 0.20 & 0.193 & [0.175, 0.212] \\
+Copper (not in the fund) & 0 & 0.003 & [$-0.002$, 0.007] \\
+\bottomrule
+\end{tabular}
+\end{center}
+\begin{itemize}
+  \item The test $R^2$ is 0.981, and the out-of-sample tracking error is 1.98\%/yr against
+        the 2\% noise.
+  \item Copper wins the fourth slot on the test set by noise (the remark of
+        \S\ref{en:sec:search}), and its interval contains zero.
+\end{itemize}
+The script plots the lasso path, the best $R^2$ by subset size, the validation curve with
+its standard errors, the bootstrap intervals against the true weights, and the cumulative
+fund against its replication.
+
+%==============================================================================
+\section{Verification}
+\code{tests/test\_regression.cpp} (Catch2) checks:
+\begin{itemize}
+  \item $\lambda=0$ reproduces OLS;
+  \item $\alpha=0$ reproduces the ridge closed form $(\tilde X^\T\tilde X+n\lambda I)^{-1}\tilde X^\T\tilde y$;
+  \item solutions satisfy the optimality conditions \eqref{en:eq:kkt};
+  \item $\lambda_{\max}$ zeroes every coefficient exactly, the next point of the grid does
+        not, and the grid runs from $\lambda_{\max}$ to $r\lambda_{\max}$;
+  \item constant factors get a zero coefficient;
+  \item exhaustive and forward search recover the true factors out of sample, and Auto
+        switches to Forward above the limit;
+  \item in-sample BIC rejects noise factors;
+  \item a single-point grid skips validation;
+  \item walk-forward validation works with the 1-SE rule;
+  \item bootstrap intervals cover the true coefficients;
+  \item results, bootstrap draws included, are identical for 1 and 4 threads;
+  \item refitting keeps the out-of-sample predictions;
+  \item the \code{DataFrame} interface keeps names and the index;
+  \item invalid parameters and data throw.
+\end{itemize}
+\code{nabia\_python/tests/bridge/test\_regression.py} repeats the key checks through Python.
+The suites also run under AddressSanitizer.
+
+\section{Limitations}
+\begin{itemize}
+  \item The model is linear with constant coefficients. Time-varying exposures need rolling
+        windows, or a state-space model such as the Kalman filter of the forecasting module.
+  \item The bootstrap is conditional on the selected subset and hyperparameters
+        (\S\ref{en:sec:bootstrap}).
+  \item Exhaustive search grows as $\binom Nk$. Forward search is greedy.
+  \item The test error of the selected model is optimistic when many subsets are compared.
+\end{itemize}
+
+\section*{References}
+\begin{itemize}\small
+  \item J.~Friedman, T.~Hastie, R.~Tibshirani (2010). Regularization paths for generalized linear
+        models via coordinate descent. \emph{Journal of Statistical Software} 33(1).
+  \item H.~Zou, T.~Hastie (2005). Regularization and variable selection via the elastic net.
+        \emph{JRSS B} 67(2).
+  \item H.~Zou, T.~Hastie, R.~Tibshirani (2007). On the ``degrees of freedom'' of the lasso.
+        \emph{Annals of Statistics} 35(5).
+  \item P.~Tseng (2001). Convergence of a block coordinate descent method for nondifferentiable
+        minimization. \emph{JOTA} 109(3).
+  \item B.~Efron (2004). The estimation of prediction error: covariance penalties and
+        cross-validation. \emph{JASA} 99(467).
+  \item H.~K\"unsch (1989). The jackknife and the bootstrap for general stationary observations.
+        \emph{Annals of Statistics} 17(3).
+  \item J.~Campbell, S.~Thompson (2008). Predicting excess stock returns out of sample.
+        \emph{Review of Financial Studies} 21(4).
+  \item T.~Hastie, R.~Tibshirani, J.~Friedman (2009). \emph{The Elements of Statistical Learning},
+        2nd ed., Springer.
+\end{itemize}

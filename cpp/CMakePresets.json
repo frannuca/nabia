@@ -44,14 +44,13 @@
     },
     {
       "name": "python-bridge",
-      "displayName": "Python bindings, development build (RelWithDebInfo, uses ../python/.venv)",
+      "displayName": "Python bindings, development build (RelWithDebInfo, uses ../nabia_python/.venv)",
       "inherits": "base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "NABIA_BUILD_PYTHON_BRIDGE": "ON",
         "NABIA_BUILD_EXAMPLES": "OFF",
-        "NABIA_BUILD_DOCS": "OFF",
-        "Python_EXECUTABLE": "${sourceDir}/../python/.venv/bin/python"
+        "Python_EXECUTABLE": "${sourceDir}/../nabia_python/.venv/bin/python"
       }
     }
   ],

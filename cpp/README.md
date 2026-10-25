@@ -17,7 +17,6 @@ the numerical building blocks for each stage, built on Eigen.
 | `examples` | C++ usage examples |
 | `bindings` | pybind11 bindings and the Python files of the `nabia_python_bridge` package ([README](bindings/README.md)) |
 | `pyproject.toml`, `scripts/build_wheels.sh` | the wheel build (scikit-build-core, cibuildwheel) |
-| `doc` | the C++ reference and the theory notes (LaTeX and PDF) |
 | `tools/lldb` | LLDB formatters for Eigen |
 
 ## Contents
@@ -93,8 +92,8 @@ behind a common `IOptimizer<T, R>` interface.
   error. Subsets and bootstrap samples run in parallel, and the results are identical
   for every thread count.
 - Derivations (coordinate update, `lambda_max`, degrees of freedom, cross-validation,
-  BIC/AIC, block bootstrap) and usage from C++ and Python:
-  [`doc/regression/elastic_net_regression.pdf`](doc/regression/elastic_net_regression.pdf).
+  BIC/AIC, block bootstrap) and usage from C++ and Python: chapter "Elastic net factor regression:
+  derivations" of [`../doc/nabia.pdf`](../doc/nabia.pdf).
 
 ### Statistics — `stats/`
 Descriptive statistics, autocorrelation, and normal density, CDF and quantile.
@@ -109,8 +108,8 @@ scripts/build_wheels.sh                 # CPython 3.10-3.14, each wheel tested (
 scripts/build_wheels.sh 3.14            # one version
 ```
 
-The Python projects (`../python`, `../webui`) install it from there; the bindings' tests and the
-examples on market data are in `../python`. See [`bindings/README.md`](bindings/README.md).
+The Python project (`../nabia_python`) installs it from there; the bindings' tests are in
+`../nabia_python/tests/bridge`. See [`bindings/README.md`](bindings/README.md).
 
 ## Applications
 
@@ -127,7 +126,7 @@ cmake --preset debug && cmake --build --preset debug && ctest --preset debug
 ```
 
 Presets: `debug`, `release`, `releaseWithDebugInfo`, `asan`, and `python-bridge` (a development build of
-the bindings, with `../python/.venv` as the interpreter). Dependencies: Eigen and iir1 (fetched
+the bindings, with `../nabia_python/.venv` as the interpreter). Dependencies: Eigen and iir1 (fetched
 automatically if not installed), nlohmann/json for the applications, Catch2 for the tests, pybind11 for
 the bindings. Turn the applications off with `-DNABIA_BUILD_APPS=OFF`.
 
@@ -153,38 +152,7 @@ echo "command script import $PWD/tools/lldb/eigen_lldb.py" >> ~/.lldbinit
 
 ## Documentation
 
-`doc/` holds the documentation of this project, LaTeX sources with their PDFs:
-
-- [`doc/nabia_cpp_reference.pdf`](doc/nabia_cpp_reference.pdf): the reference of the C++ project. It
-  covers the architecture and every method of the library, stated mathematically, the command-line
-  application, the bindings and the wheels. Its code excerpts are extracted from the source at build
-  time by `doc/extract_snippets.py`, so they always match the current code.
-- [`doc/packaging/wheels_and_github_actions.pdf`](doc/packaging/wheels_and_github_actions.pdf): a tutorial
-  on wheels, cibuildwheel and GitHub Actions, built on this project's own `pyproject.toml`, scripts and
-  workflow: what a wheel is and how pip picks one, how it is built and tested, how the workflow's jobs
-  work, how to write new ones, and how to debug and release.
-- Theory notes, in subfolders that mirror the library: `doc/forecast/` (exponential smoothing, Kalman
-  filter, Gaussian processes), `doc/optimization/convex/`, `doc/regression/` (elastic net). They share
-  the style file in `doc/common/`.
-
-The Python package and the web UI have their own references in `../python/doc` and `../webui/doc`.
-
-The PDFs are built with the library whenever `pdflatex` is installed (a TeX
-distribution such as TeX Live or MacTeX); turn them off with
-`-DNABIA_BUILD_DOCS=OFF`. To build only the documentation:
-
-```sh
-cmake --preset debug                              # once, to configure
-cmake --build --preset debug --target nabia_docs  # all PDFs
-cmake --build --preset debug --target nabia_doc_kalman_filter   # a single one
-```
-
-Each PDF is compiled in the matching folder of the build tree (for example
-`build/debug/doc/forecast/kalman_filter.pdf`) and copied next to its source
-(`doc/forecast/kalman_filter.pdf`). If a document fails to compile, its LaTeX log is in the
-build tree (`build/debug/doc/forecast/kalman_filter.log`). To compile a theory note by hand:
-
-```sh
-cd doc/forecast
-TEXINPUTS=../common: pdflatex kalman_filter.tex   # run 2-3 times for references
-```
+The whole project, this library included, is documented in one PDF, [`../doc/nabia.pdf`](../doc/nabia.pdf):
+the numerical core with its mathematics (Part III), the full derivations of the forecasters, the optimizers and
+the elastic net (Part IV), the application, bindings and wheel packaging (Part V), with code excerpts and
+`file:line` pointers extracted from this source tree when it is built (`../doc/build.sh`).

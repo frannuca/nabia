@@ -53,8 +53,7 @@ struct AugmentedLagrangianResult {
 ///
 /// `tolerance` is the KKT tolerance (stationarity and feasibility) and
 /// `max_iter` caps the number of outer iterations.
-/// See doc/optimization/convex/convex_optimization.tex (built as
-/// convex_optimization.pdf) for the theory and the algorithm.
+/// See the chapter "Convex optimization" of doc/nabia.pdf for the theory and the algorithm.
 class AugmentedLagrangian: public IConvexOptimization<AugmentedLagrangianResult> {
 public:
     using Objective = std::function<double(const Eigen::VectorXd&)>;

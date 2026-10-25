@@ -23,6 +23,9 @@ cmake.build-type = "Release"
 # CMake installs the whole package (bindings/nabia_python_bridge/*.py, _core and _rb_backtest), so a
 # development build's modules or __pycache__ left in the source tree never end up in the wheel.
 wheel.packages = []
+# Only the install rules of the bindings (COMPONENT python in bindings/CMakeLists.txt): dependencies
+# fetched at configure time (Eigen on CI runners) have install rules of their own.
+install.components = ["python"]
 build-dir = "build/{wheel_tag}"
 
 [tool.scikit-build.cmake.define]
@@ -30,18 +33,17 @@ NABIA_BUILD_PYTHON_BRIDGE = "ON"
 NABIA_BUILD_APPS = "OFF"
 NABIA_BUILD_TESTS = "OFF"
 NABIA_BUILD_EXAMPLES = "OFF"
-NABIA_BUILD_DOCS = "OFF"
 # nabia, iir1 and rb_backtest_core are static libraries linked into the extension modules.
 CMAKE_POSITION_INDEPENDENT_CODE = "ON"
 
 # Wheels for every supported Python and platform (run by .github/workflows/wheels.yml):
 #   pipx run cibuildwheel==4.3.4 --platform linux cpp     (from the repository root; Linux needs Docker)
-# Each wheel is tested with the bridge tests of the Python project ({project} is the repository root).
+# Each wheel is tested with the bridge tests of nabia_python ({project} is the repository root).
 [tool.cibuildwheel]
 build = "cp310-* cp311-* cp312-* cp313-* cp314-*"
 skip = "*-musllinux_* *-win32 *-manylinux_i686"
 test-extras = ["test"]
-test-command = "pytest -q -p no:cacheprovider {project}/python/tests/bridge"
+test-command = "pytest -q -p no:cacheprovider {project}/nabia_python/tests/bridge"
 
 [tool.cibuildwheel.linux]
 # GCC 12+ for C++20; Eigen and iir1 are fetched at configure time.

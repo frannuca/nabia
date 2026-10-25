@@ -1,0 +1,599 @@
+\chapter{Convex optimization}\label{ch:co}
+
+This document describes the algorithms in the \texttt{nabia} module
+\texttt{optimization/convex}: the limited-memory BFGS method (\texttt{LBFGS})
+for smooth unconstrained problems, and two solvers for smooth problems with
+linear equality, inequality and box constraints: the augmented Lagrangian
+method, also called the method of multipliers (\texttt{AugmentedLagrangian}),
+and sequential quadratic programming (\texttt{SQP}). We derive the
+augmented Lagrangian for equalities and inequalities and the multiplier updates. We then
+discuss convergence in the convex case and the practical safeguards (penalty update,
+inexact inner solves, stopping tests), and present L-BFGS as both a standalone
+solver and the inner solver. Finally we derive SQP: its quadratic subproblem,
+the damped BFGS Hessian approximation and the $\ell_1$ merit function, and
+compare when each constrained solver is preferable.
+
+
+
+
+%==============================================================================
+\section{Module overview}
+
+\begin{table}[ht]
+\centering
+\begin{tabular}{@{}l>{\raggedright\arraybackslash}p{9.5cm}@{}}
+\toprule
+Type & Role \\
+\midrule
+\texttt{IOptimizer<T, R>} & Base interface: owns the parameters \texttt{T} through a \texttt{std::unique\_ptr}, declares \texttt{optimize(initial\_guess)}, which returns the solution, and \texttt{result()}, which returns the solver's result object \texttt{R}. \\
+\texttt{LBFGS} & \texttt{IOptimizer<LBFGSParams, LBFGSResult>}; unconstrained smooth minimization (Section~\ref{co:sec:lbfgs}). \\
+\texttt{IConvexOptimization<R>} & \texttt{IOptimizer<ConvexOptimizationParams, R>}; interface for constrained convex solvers. \\
+\texttt{AugmentedLagrangian} & \texttt{IConvexOptimization<AugmentedLagrangianResult>}; linearly constrained convex minimization, using \texttt{LBFGS} for its subproblems. \\
+\texttt{SQP} & \texttt{IConvexOptimization<SQPResult>}; linearly constrained smooth minimization with few evaluations of $f$ (Section~\ref{co:sec:sqp}); solves its QP subproblems with \texttt{AugmentedLagrangian}. \\
+\texttt{LinearConstraint} & $\Aeq x=\beq$ and $\Ain x\le\bin$ as Eigen matrices and vectors. \\
+\texttt{BoxConstraints} & Bounds $\ell\le x\le u$ (Section~\ref{co:sec:box}). \\
+\texttt{Constraints} & \texttt{std::variant<BoxConstraints, LinearConstraint>}; held as \texttt{std::optional} in \texttt{ConvexOptimizationParams}, where empty means unconstrained. \texttt{to\_linear\_constraint} converts any of them to matrix form. \\
+\bottomrule
+\end{tabular}
+\caption{Types in \texttt{nabia/optimization}.}
+\end{table}
+
+All solvers follow the same pattern: construct with a parameter object and the
+objective (and gradient), then call
+\texttt{optimize(std::optional<Eigen::VectorXd> initial\_guess)}. It returns
+the solution and starts from zero when no guess is given. Diagnostics such as
+multipliers, residuals and iteration counts are in \texttt{result()}. The same
+solver can be run again from a different starting point. Invalid input (mismatched dimensions, inconsistent
+constraints, nonpositive tolerances) raises \texttt{std::invalid\_argument}.
+
+%==============================================================================
+\section{Problem statement}
+
+We consider
+\begin{equation}\label{co:eq:problem}
+  \min_{x\in\R^n} \; f(x)
+  \quad\text{s.t.}\quad
+  h(x) \coloneqq \Aeq x - \beq = 0, \qquad
+  g(x) \coloneqq \Ain x - \bin \le 0,
+\end{equation}
+with $f:\R^n\to\R$ convex and continuously differentiable,
+$\Aeq\in\R^{p\times n}$, $\Ain\in\R^{m\times n}$. Box constraints
+$\ell \le x \le u$ are a special case of the inequalities
+(Section~\ref{co:sec:box}).
+
+\paragraph{Lagrangian and KKT conditions.}
+With multipliers $\lambda\in\R^p$ for the equalities and $\mu\in\R^m$ for the
+inequalities, the Lagrangian is
+\[
+  L(x,\lambda,\mu) = f(x) + \lambda^\top h(x) + \mu^\top g(x).
+\]
+Because the constraints are linear, no further constraint qualification is
+needed: a point $x^\star$ solves \eqref{co:eq:problem} if and only if there exist
+$(\lambda^\star,\mu^\star)$ satisfying the Karush--Kuhn--Tucker conditions
+\begin{align}
+  \nabla f(x^\star) + \Aeq^\top\lambda^\star + \Ain^\top\mu^\star &= 0
+    && \text{(stationarity)} \label{co:eq:kkt-stat}\\
+  \Aeq x^\star = \beq, \quad \Ain x^\star &\le \bin
+    && \text{(primal feasibility)} \label{co:eq:kkt-feas}\\
+  \mu^\star &\ge 0
+    && \text{(dual feasibility)} \\
+  \mu^\star_i\, g_i(x^\star) &= 0,\; i=1,\dots,m
+    && \text{(complementarity)} \label{co:eq:kkt-comp}
+\end{align}
+The multipliers have a sensitivity interpretation: $\lambda^\star_i$ and
+$\mu^\star_i$ are the rates of change of the optimal value with respect to the
+right-hand sides $b_i$ (with opposite sign).
+
+%==============================================================================
+\section{From penalties to augmented Lagrangians}
+
+\subsection{The quadratic penalty and its drawback}
+The simplest way to remove the equality constraints is the quadratic penalty
+\[
+  Q_\rho(x) = f(x) + \frac{\rho}{2}\norm{h(x)}^2 .
+\]
+Its minimizer $x_\rho$ satisfies $\nabla f(x_\rho) + \Aeq^\top\big(\rho\,h(x_\rho)\big) = 0$.
+Comparing with \eqref{co:eq:kkt-stat}, $\rho\,h(x_\rho)$ plays the role of the
+multiplier. Since $\lambda^\star$ is generally nonzero, $h(x_\rho)\approx\lambda^\star/\rho$
+vanishes only as $\rho\to\infty$. The Hessian of $Q_\rho$ contains the term
+$\rho\,\Aeq^\top\Aeq$, so its condition number grows like $\rho$ and the
+subproblems become increasingly hard to solve accurately.
+
+\subsection{Shifting the penalty: equality constraints}
+The augmented Lagrangian adds the penalty to the Lagrangian instead of to $f$:
+\begin{equation}\label{co:eq:al-eq}
+  L_\rho(x,\lambda) = f(x) + \lambda^\top h(x) + \frac{\rho}{2}\norm{h(x)}^2 ,
+  \qquad
+  \nabla_x L_\rho = \nabla f(x) + \Aeq^\top\big(\lambda + \rho\,h(x)\big).
+\end{equation}
+If $x^+$ minimizes $L_\rho(\cdot,\lambda)$, then
+$\nabla f(x^+) + \Aeq^\top(\lambda+\rho h(x^+)) = 0$. This is exactly the
+stationarity condition \eqref{co:eq:kkt-stat} with the multiplier estimate
+\begin{equation}\label{co:eq:update-eq}
+  \lambda^+ = \lambda + \rho\, h(x^+).
+\end{equation}
+Now $h(x^+) = (\lambda^+-\lambda)/\rho$, so feasibility only requires the
+multiplier estimates to converge, not $\rho\to\infty$. If $\lambda=\lambda^\star$,
+then $x^\star$ already minimizes $L_\rho(\cdot,\lambda^\star)$ for every
+$\rho>0$: the penalty is \emph{exact} at the right multiplier.
+
+\subsection{Inequality constraints}
+Write each inequality with a slack, $g_i(x) + s_i = 0$, $s_i\ge 0$, and apply
+\eqref{co:eq:al-eq} to the equality $g(x)+s=0$:
+\[
+  \min_{x,\; s\ge 0}\; f(x) + \mu^\top\big(g(x)+s\big) + \frac{\rho}{2}\norm{g(x)+s}^2 .
+\]
+The minimization over $s$ separates by component and has a closed form. For
+fixed $x$, the unconstrained minimizer of
+$\mu_i(g_i+s_i)+\tfrac{\rho}{2}(g_i+s_i)^2$ is $s_i=-g_i-\mu_i/\rho$; projecting
+onto $s_i\ge 0$ gives $s_i^\star = \max\{0,\,-g_i-\mu_i/\rho\}$. Substituting back:
+\begin{itemize}
+  \item if $\mu_i+\rho g_i \le 0$ (constraint comfortably inactive), then
+        $g_i+s_i^\star=-\mu_i/\rho$ and the term equals $-\mu_i^2/(2\rho)$;
+  \item if $\mu_i+\rho g_i > 0$, then $s_i^\star=0$ and the term equals
+        $\mu_i g_i+\tfrac{\rho}{2}g_i^2 = \big((\mu_i+\rho g_i)^2-\mu_i^2\big)/(2\rho)$.
+\end{itemize}
+Both cases combine into the Powell--Hestenes--Rockafellar (PHR) augmented
+Lagrangian
+\begin{equation}\label{co:eq:al}
+  \boxed{\;
+  L_\rho(x,\lambda,\mu) = f(x) + \lambda^\top h(x) + \frac{\rho}{2}\norm{h(x)}^2
+  + \frac{1}{2\rho}\sum_{i=1}^m\Big(\pos{\mu_i+\rho\,g_i(x)}^2 - \mu_i^2\Big)
+  \;}
+\end{equation}
+with $\pos{t}=\max\{0,t\}$, and gradient
+\begin{equation}\label{co:eq:al-grad}
+  \nabla_x L_\rho(x,\lambda,\mu)
+  = \nabla f(x) + \Aeq^\top\big(\lambda+\rho\,h(x)\big) + \Ain^\top\pos{\mu+\rho\,g(x)} .
+\end{equation}
+Applying \eqref{co:eq:update-eq} to $g+s^\star$ gives the inequality update
+\begin{equation}\label{co:eq:update-in}
+  \mu^+ = \mu + \rho\big(g(x^+)+s^\star\big) = \pos{\mu + \rho\, g(x^+)} ,
+\end{equation}
+which keeps $\mu^+\ge 0$ automatically.
+
+Properties of \eqref{co:eq:al}:
+\begin{itemize}
+  \item $L_\rho(\cdot,\lambda,\mu)$ is convex whenever $f$ is (the extra terms
+        are convex functions of affine maps), and continuously differentiable.
+  \item It is \emph{not} twice differentiable where $\mu_i+\rho g_i(x)=0$.
+        This is why a quasi-Newton inner solver (L-BFGS) is a good fit: it
+        only uses gradients.
+  \item With the updated multipliers, the gradient
+        \eqref{co:eq:al-grad} at $x^+$ is exactly the stationarity residual of the
+        KKT system:
+        $\nabla_x L_\rho(x^+,\lambda,\mu) = \nabla f(x^+)+\Aeq^\top\lambda^+ +\Ain^\top\mu^+$.
+        The inner solver's gradient norm therefore measures KKT stationarity
+        directly.
+\end{itemize}
+
+%==============================================================================
+\section{Convergence in the convex case}
+
+\paragraph{Dual interpretation.}
+Let $d(\lambda,\mu)=\inf_x L(x,\lambda,\mu)$ be the (concave) dual function.
+Rockafellar~\cite{rockafellar1976} showed that one step of the method of
+multipliers, minimizing \eqref{co:eq:al} and applying
+\eqref{co:eq:update-eq}--\eqref{co:eq:update-in}, is exactly one step of the
+\emph{proximal point algorithm} applied to the dual:
+\[
+  (\lambda^+,\mu^+) = \argmax_{\lambda,\;\mu\ge 0}\;
+    \Big\{ d(\lambda,\mu) - \frac{1}{2\rho}\norm{(\lambda,\mu)-(\lambda_k,\mu_k)}^2 \Big\}.
+\]
+Equivalently, it is a gradient ascent step of length $\rho$ on the smoothed dual,
+whose gradient is the constraint residual. Consequences for convex problems:
+\begin{itemize}
+  \item For \emph{any} fixed $\rho>0$, if \eqref{co:eq:problem} has a KKT point, the
+        multipliers converge to a dual solution and every limit point of
+        $x_k$ is primal optimal. Unlike the pure penalty method, $\rho$ does not have to
+        go to infinity.
+  \item This remains true when the subproblems are solved inexactly, provided
+        the errors are summable (e.g.\ inner tolerances $\varepsilon_k\to 0$
+        geometrically).
+  \item The rate is linear, and the linear constant improves as $\rho$ grows;
+        with $\rho_k\to\infty$ it is superlinear. Larger $\rho$ makes outer
+        iterations more effective but inner problems more ill-conditioned; the
+        practical rule of Section~\ref{co:sec:practical} balances both.
+\end{itemize}
+For nonconvex $f$ the method still works locally (under second-order
+sufficiency, for $\rho$ above a threshold), but \texttt{nabia} targets the
+convex case.
+
+%==============================================================================
+\section{Practical algorithm}\label{co:sec:practical}
+
+\paragraph{Measuring infeasibility.}
+For the inequalities, $g_i\le 0$ alone is not enough: complementarity
+\eqref{co:eq:kkt-comp} must hold too. We use the measure of Birgin and
+Mart\'inez~\cite{birgin2014}
+\begin{equation}\label{co:eq:violation}
+  V_k = \max\Big\{ \norm{h(x_k)}_\infty,\;
+                   \norm{\max\{g(x_k),\,-\mu_k/\rho_k\}}_\infty \Big\},
+\end{equation}
+evaluated \emph{before} the multiplier update. The $i$-th inequality term is zero
+iff $g_i\le 0$ and either $g_i=0$ or $\mu_i=0$. Moreover,
+$\max\{g,-\mu/\rho\} = (\mu^+-\mu)/\rho$, so $V_k$ also measures how much the
+multipliers still move.
+
+\paragraph{Penalty update.}
+If the violation did not decrease enough,
+$V_k > \tau\, V_{k-1}$ (default $\tau=0.25$), the multipliers alone are not
+making fast enough progress and the penalty is increased,
+$\rho_{k+1}=\min\{\gamma\rho_k,\rho_{\max}\}$ (default $\gamma=10$).
+Otherwise $\rho$ is kept.
+
+\paragraph{Inexact inner solves.}
+Early outer iterations use inaccurate multipliers, so solving their subproblems
+to high accuracy is wasted work. The inner tolerance starts at
+$\varepsilon_0 = \max\{\texttt{tol},\,10^{-1}\}$ and shrinks as
+$\varepsilon_{k+1}=\max\{\texttt{tol},\,0.1\,\varepsilon_k\}$. Each subproblem is warm
+started at the previous $x_k$.
+
+\paragraph{Stopping test.}
+The method stops when both KKT residuals are below the user tolerance:
+\[
+  \norm{\nabla_x L_{\rho_k}(x_{k+1},\lambda_k,\mu_k)}_\infty \le \texttt{tol}
+  \quad\text{and}\quad V_k \le \texttt{tol}.
+\]
+By the identity at the end of Section~2, the first condition is stationarity
+\eqref{co:eq:kkt-stat} for the updated multipliers. The multipliers are
+nonnegative by construction, and $V_k$ covers feasibility and complementarity.
+So the test certifies an approximate KKT point.
+
+\begin{algorithm}[ht]
+\caption{Augmented Lagrangian (PHR) with L-BFGS inner solver}\label{co:alg:al}
+\begin{algorithmic}[1]
+\Require $x_0$, tolerance $\texttt{tol}$, $\rho_0>0$, $\gamma>1$, $\tau\in(0,1)$, $\rho_{\max}$
+\State $\lambda_0\gets 0$, $\mu_0\gets 0$, $\varepsilon_0 \gets \max\{\texttt{tol},10^{-1}\}$, $V_{-1}\gets\infty$
+\For{$k=0,1,\dots,\texttt{max\_iter}-1$}
+  \State $x_{k+1}\gets\argmin_x L_{\rho_k}(x,\lambda_k,\mu_k)$ from $x_k$, up to $\norm{\nabla_x L_{\rho_k}}_\infty\le\varepsilon_k$ \Comment{Alg.~\ref{co:alg:lbfgs}}
+  \State $V_k \gets \max\{\norm{h(x_{k+1})}_\infty,\ \norm{\max\{g(x_{k+1}),-\mu_k/\rho_k\}}_\infty\}$
+  \State $\lambda_{k+1}\gets\lambda_k+\rho_k\,h(x_{k+1})$
+  \State $\mu_{k+1}\gets\pos{\mu_k+\rho_k\,g(x_{k+1})}$
+  \If{$\norm{\nabla_x L_{\rho_k}(x_{k+1},\lambda_k,\mu_k)}_\infty\le\texttt{tol}$ \textbf{and} $V_k\le\texttt{tol}$}
+    \State \Return $(x_{k+1},\lambda_{k+1},\mu_{k+1})$ \Comment{approximate KKT point}
+  \EndIf
+  \If{$V_k > \tau V_{k-1}$}
+    \State $\rho_{k+1}\gets\min\{\gamma\rho_k,\rho_{\max}\}$
+  \Else
+    \State $\rho_{k+1}\gets\rho_k$
+  \EndIf
+  \State $\varepsilon_{k+1}\gets\max\{\texttt{tol},\,0.1\,\varepsilon_k\}$
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+When there are no constraints, \eqref{co:eq:al} reduces to $f$, and the
+implementation solves a single subproblem directly to the tolerance
+$\texttt{tol}$.
+
+%==============================================================================
+\section{The inner solver: L-BFGS}\label{co:sec:lbfgs}
+
+Each subproblem $\min_x L_{\rho}(x,\lambda,\mu)$ is smooth and unconstrained.
+\texttt{nabia} solves it with limited-memory BFGS~\cite{nocedal1980,liu1989},
+which is also exposed as the standalone optimizer \texttt{LBFGS}.
+
+\paragraph{Quasi-Newton direction.}
+BFGS keeps an approximation $H_k$ of the inverse Hessian and moves along
+$d_k=-H_k\nabla f(x_k)$. With $s_k=x_{k+1}-x_k$, $y_k=\nabla f(x_{k+1})-\nabla f(x_k)$
+and $\rho_k=1/(y_k^\top s_k)$, the update is
+\[
+  H_{k+1} = (I-\rho_k s_k y_k^\top)\,H_k\,(I-\rho_k y_k s_k^\top) + \rho_k s_k s_k^\top .
+\]
+L-BFGS never forms $H_k$. It stores the last $M$ pairs $(s_j,y_j)$ and computes
+$H_k\nabla f$ with the two-loop recursion (Algorithm~\ref{co:alg:lbfgs}) in
+$O(Mn)$ time and memory. The initial matrix is
+$H_k^0=\gamma_k I$ with $\gamma_k = s_{k-1}^\top y_{k-1}/y_{k-1}^\top y_{k-1}$,
+which gives the step a meaningful scale.
+
+\paragraph{Safeguards.}
+\begin{itemize}
+  \item A pair is stored only if $s^\top y > 10^{-12}\norm{s}\norm{y}$.
+        This keeps $H_k$ positive definite and $d_k$ a descent direction.
+        For convex $f$ the curvature condition $s^\top y\ge 0$ always holds.
+  \item If $d_k$ is not a descent direction (for example due to round-off), the memory is
+        cleared and a normalized steepest-descent step is taken.
+  \item The step length $t$ is chosen by backtracking ($t\gets 0.5t$) from $t=1$
+        until the Armijo condition
+        $f(x_k+t d_k)\le f(x_k)+c_1 t\,\nabla f(x_k)^\top d_k$ holds
+        (default $c_1=10^{-4}$). Non-finite trial values are rejected.
+  \item \emph{Approximate Wolfe acceptance.} Close to a minimizer, the decrease
+        $c_1 t\,|\nabla f^\top d|$ that Armijo demands falls below the rounding
+        error in $f$. The test then stalls even though the gradient, which
+        is still accurate, would allow progress. Following Hager and
+        Zhang~\cite{hager2005}, a step is also accepted when $f$ is flat to
+        within rounding, $f(x_k+td_k)\le f(x_k)+\epsilon_f|f(x_k)|$, and the
+        directional derivative satisfies
+        $\sigma\,\nabla f(x_k)^\top d_k \le \nabla f(x_k+td_k)^\top d_k \le (2c_1-1)\,\nabla f(x_k)^\top d_k$
+        (defaults $\epsilon_f=10^{-10}$, $\sigma=0.9$). Without this rule the risk
+        budgeting solver, for example, stalls at an accuracy of about $3\cdot 10^{-8}$ on
+        problems with hundreds of assets.
+\end{itemize}
+
+\begin{algorithm}[ht]
+\caption{L-BFGS with Armijo backtracking}\label{co:alg:lbfgs}
+\begin{algorithmic}[1]
+\Require $x_0$, memory $M$, tolerance $\varepsilon$
+\For{$k=0,1,\dots$}
+  \If{$\norm{\nabla f(x_k)}_\infty\le\varepsilon$} \Return $x_k$ \EndIf
+  \State $q\gets\nabla f(x_k)$
+  \For{$j=k-1,\dots,k-M$} \Comment{newest to oldest}
+    \State $\alpha_j\gets\rho_j s_j^\top q$; \quad $q\gets q-\alpha_j y_j$
+  \EndFor
+  \State $r\gets\gamma_k q$
+  \For{$j=k-M,\dots,k-1$} \Comment{oldest to newest}
+    \State $\beta\gets\rho_j y_j^\top r$; \quad $r\gets r+(\alpha_j-\beta)s_j$
+  \EndFor
+  \State $d_k\gets -r$; \textbf{if} $\nabla f(x_k)^\top d_k\ge 0$ \textbf{then} clear memory, $d_k\gets-\nabla f(x_k)/\max\{1,\norm{\nabla f(x_k)}\}$
+  \State $t\gets 1$; \textbf{while} $f(x_k+td_k)>f(x_k)+c_1t\nabla f(x_k)^\top d_k$ \textbf{do} $t\gets t/2$
+  \State $x_{k+1}\gets x_k+td_k$; store $(s_k,y_k)$ if $s_k^\top y_k>0$, dropping the oldest pair beyond $M$
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+%==============================================================================
+\section{Sequential quadratic programming}\label{co:sec:sqp}
+
+The augmented Lagrangian method needs many evaluations of $f$: each outer
+iteration is a full L-BFGS run. Sequential quadratic programming (SQP)
+instead builds a quadratic model of the problem at every iterate. It solves
+that model, which costs no evaluations of $f$, and takes one step. When $f$
+is expensive and $n$ is moderate (SQP stores a dense $n\times n$ matrix),
+this is usually far cheaper overall.
+
+\subsection{The QP subproblem}
+SQP is Newton's method applied to the KKT conditions. For
+\eqref{co:eq:problem}, linearizing the KKT system at the current iterate $x_k$
+gives the optimality conditions of the quadratic program
+\begin{equation}\label{co:eq:qp}
+  \min_{d\in\R^n}\; \nabla f(x_k)^\top d + \tfrac12\, d^\top B_k d
+  \quad\text{s.t.}\quad
+  \Aeq(x_k+d) = \beq,\qquad \Ain(x_k+d)\le\bin,
+\end{equation}
+with $B_k\approx\nabla^2_{xx}L(x_k,\lambda,\mu)$. Because the constraints are
+linear, two simplifications follow:
+\begin{itemize}
+  \item The linearized constraints are the constraints themselves. The QP is
+        feasible whenever \eqref{co:eq:problem} is, and a full step $d$ lands
+        on a feasible point, even from an infeasible $x_k$.
+  \item The constraints have zero curvature, so
+        $\nabla^2_{xx}L=\nabla^2 f$. $B_k$ only has to approximate the
+        Hessian of $f$, and the multipliers do not enter it.
+\end{itemize}
+The KKT conditions of \eqref{co:eq:qp} are
+\[
+  \nabla f(x_k) + B_k d + \Aeq^\top\lambda + \Ain^\top\mu = 0,\quad
+  \mu\ge 0,\quad \mu_i\big(g_i(x_k)+(\Ain d)_i\big)=0,
+\]
+plus feasibility. The QP multipliers $(\lambda,\mu)$ are therefore estimates of
+the multipliers of \eqref{co:eq:problem}. If $d=0$ solves the QP, then $x_k$ is
+a KKT point of the original problem.
+
+\subsection{Damped BFGS Hessian approximation}
+With $s_k=x_{k+1}-x_k$ and $y_k=\nabla f(x_{k+1})-\nabla f(x_k)$, the BFGS
+update keeps $B_k$ positive definite only if $s_k^\top y_k>0$. That always
+holds for strictly convex $f$, but can fail otherwise. Powell's damping~\cite{powell1978}
+replaces $y_k$ by
+\[
+  r_k = \theta_k y_k + (1-\theta_k) B_k s_k,\qquad
+  \theta_k = \begin{cases}
+    1 & \text{if } s_k^\top y_k \ge 0.2\, s_k^\top B_k s_k,\\[2pt]
+    \dfrac{0.8\, s_k^\top B_k s_k}{s_k^\top B_k s_k - s_k^\top y_k} & \text{otherwise,}
+  \end{cases}
+\]
+which guarantees $s_k^\top r_k\ge 0.2\,s_k^\top B_k s_k>0$, and updates
+\[
+  B_{k+1} = B_k - \frac{B_k s_k s_k^\top B_k}{s_k^\top B_k s_k} + \frac{r_k r_k^\top}{s_k^\top r_k}.
+\]
+$B_0=I$ is rescaled to $(y_0^\top y_0/s_0^\top y_0)\,I$ after the first step, as in
+L-BFGS. Positive definiteness makes every QP strictly convex, so its solution
+is unique.
+
+\subsection{Merit function and line search}
+The full step can increase $f$ or fail to make progress, so the step length
+$t$ is chosen on the $\ell_1$ merit function~\cite{han1977}
+\[
+  \phi_\nu(x) = f(x) + \nu\, V_1(x),\qquad
+  V_1(x) = \norm{h(x)}_1 + \norm{\pos{g(x)}}_1 .
+\]
+For $\nu$ larger than every multiplier, $\phi_\nu$ is an \emph{exact} penalty:
+its minimizers are the solutions of \eqref{co:eq:problem}.
+
+\paragraph{The QP step is a descent direction.}
+Since the constraints are linear and $d$ satisfies them,
+$V_1(x_k+td)\le(1-t)V_1(x_k)$ for $t\in[0,1]$. The directional derivative is
+therefore $D\phi_\nu(x_k;d)\le\nabla f^\top d-\nu V_1(x_k)$. From the QP
+optimality conditions, $\Aeq d=-h$, and complementarity gives $\mu^\top\Ain d=-\mu^\top g$. Hence
+\[
+  \nabla f^\top d = -d^\top B_k d + \lambda^\top h + \mu^\top g
+  \le -d^\top B_k d + \norm{(\lambda,\mu)}_\infty V_1(x_k),
+\]
+using $\mu\ge 0$ and $\mu^\top g\le\mu^\top\pos{g}$. So
+\[
+  D\phi_\nu(x_k;d) \le -d^\top B_k d - \big(\nu - \norm{(\lambda,\mu)}_\infty\big)\,V_1(x_k) < 0
+\]
+whenever $d\ne 0$ and $\nu>\norm{(\lambda,\mu)}_\infty$. The implementation keeps
+$\nu\gets\max\{\nu,\norm{(\lambda,\mu)}_\infty+\delta\}$ with $\delta=10^{-3}$ and backtracks from $t=1$
+until the Armijo condition
+$\phi_\nu(x_k+td)\le\phi_\nu(x_k)+c_1 t\,(\nabla f^\top d-\nu V_1(x_k))$ holds.
+
+\paragraph{Convergence.}
+Every accepted step decreases the merit function, which makes the method robust
+from poor (even infeasible) starting points. Under standard assumptions (bounded
+$B_k$ and multipliers) the iterates approach KKT points.
+Near a solution that satisfies the standard second-order conditions, the full step $t=1$
+is eventually accepted. Convergence is then superlinear with a BFGS
+approximation, and quadratic with the exact Hessian~\cite{nocedal2006}.
+
+\paragraph{Stopping test.}
+At each iterate the QP multipliers give the KKT residuals
+\[
+  \norm{\nabla f(x_k)+\Aeq^\top\lambda+\Ain^\top\mu}_\infty,\qquad
+  \max\{\norm{h(x_k)}_\infty,\norm{\pos{g(x_k)}}_\infty\},\qquad
+  \norm{\mu\odot g(x_k)}_\infty ,
+\]
+that is, stationarity (which equals $\norm{B_k d}_\infty$), feasibility and complementarity.
+SQP stops when all three are below \texttt{tolerance}.
+
+\paragraph{Solving the QP.}
+Without constraints, \eqref{co:eq:qp} is solved directly by a Cholesky factorization, $d=-B_k^{-1}\nabla f$.
+Otherwise it is a strictly convex QP with linear constraints, which
+\texttt{AugmentedLagrangian} solves to a tolerance of $10^{-10}$.
+This costs no evaluations of $f$, and also gives the multipliers.
+
+\begin{algorithm}[ht]
+\caption{SQP with damped BFGS and $\ell_1$ merit line search}\label{co:alg:sqp}
+\begin{algorithmic}[1]
+\Require $x_0$ (may be infeasible), tolerance \texttt{tol}, $\nu_0>0$
+\State $B\gets I$
+\For{$k=0,1,\dots,\texttt{max\_iter}-1$}
+  \State $(d,\lambda,\mu)\gets$ solution and multipliers of the QP \eqref{co:eq:qp} at $x_k$
+  \If{stationarity, feasibility and complementarity at $x_k$ are $\le\texttt{tol}$} \Return $(x_k,\lambda,\mu)$ \EndIf
+  \State $\nu\gets\max\{\nu,\norm{(\lambda,\mu)}_\infty+\delta\}$
+  \State $t\gets 1$; \textbf{while} $\phi_\nu(x_k+td)>\phi_\nu(x_k)+c_1t(\nabla f^\top d-\nu V_1(x_k))$ \textbf{do} $t\gets t/2$
+  \State \textbf{if} the line search fails \textbf{then} reset $B\gets I$ and retry (stop if $B$ already was $I$)
+  \State $x_{k+1}\gets x_k+td$;\; $s\gets x_{k+1}-x_k$;\; $y\gets\nabla f(x_{k+1})-\nabla f(x_k)$
+  \State $B\gets$ damped BFGS update of $B$ with $(s,y)$ \Comment{rescale $B$ first, at $k=0$}
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Choosing a constrained solver}
+\begin{table}[ht]
+\centering
+\begin{tabular}{@{}l>{\raggedright\arraybackslash}p{5.2cm}>{\raggedright\arraybackslash}p{5.2cm}@{}}
+\toprule
+ & Augmented Lagrangian & SQP \\
+\midrule
+Memory & $O(Mn)$ (L-BFGS pairs) & $O(n^2)$ (dense $B$) \\
+Evaluations of $f$ & many (one L-BFGS run per outer step) & few (one QP per step) \\
+Work per step & cheap & a QP solve \\
+Local rate & linear & superlinear \\
+Best for & large $n$, cheap $f$ & moderate $n$, expensive $f$ \\
+\bottomrule
+\end{tabular}
+\caption{Trade-offs between the two constrained solvers.}
+\end{table}
+On the 5-variable simplex problem of the test suite, with a non-quadratic $f$, SQP converges in 12
+iterations using 15 evaluations of $f$. The augmented Lagrangian
+needs 89 L-BFGS iterations to reach the same point.
+
+%==============================================================================
+\section{Box constraints}\label{co:sec:box}
+
+\texttt{BoxConstraints} $\ell\le x\le u$ are turned into rows of $\Ain x\le\bin$.
+Every finite $u_i$ gives the row $e_i^\top x\le u_i$, and every finite $\ell_i$ gives
+$-e_i^\top x\le-\ell_i$. Infinite bounds produce no row, and an empty bound
+vector means that side is unbounded. In \texttt{result().mu\_ineq} the upper-bound
+multipliers come first (in index order), followed by the lower-bound
+multipliers.
+Bounds with $\ell_i>u_i$ are rejected with \texttt{std::invalid\_argument}.
+The conversion is the public function \texttt{to\_linear\_constraint}
+(\texttt{Constraints.h}), which both constrained solvers use, so their
+multiplier vectors follow the same row order.
+
+%==============================================================================
+\section{Using the implementation}
+
+\subsection{Augmented Lagrangian}
+\begin{lstlisting}
+#include <nabia/optimization/convex/AugmentedLagrangian.h>
+
+// min |x - c|^2  s.t.  sum(x) = 1, x >= 0   (projection onto the simplex)
+Eigen::VectorXd c(3);  c << 1.0, -1.0, 0.5;
+
+LinearConstraint lc;
+lc.A_eq   = Eigen::MatrixXd::Ones(1, 3);      lc.b_eq   = Eigen::VectorXd::Ones(1);
+lc.A_ineq = -Eigen::MatrixXd::Identity(3, 3); lc.b_ineq = Eigen::VectorXd::Zero(3);
+
+auto params = std::make_unique<ConvexOptimizationParams>(
+    ConvexOptimizationParams{3, /*tolerance*/ 1e-8, /*max_iter*/ 100, lc});
+
+AugmentedLagrangian solver(
+    std::move(params),
+    [&](const Eigen::VectorXd& x) { return (x - c).squaredNorm(); },
+    [&](const Eigen::VectorXd& x) -> Eigen::VectorXd { return 2.0 * (x - c); });
+
+Eigen::VectorXd x = solver.optimize(std::nullopt);  // x = (0.75, 0, 0.25)
+const auto& r = solver.result();   // r.lambda_eq = (0.5), r.mu_ineq = (0, 2.5, 0)
+\end{lstlisting}
+The KKT conditions can be checked by hand:
+$2(x-c)+\lambda\mathbf{1}-\mu = 0$ gives $\lambda=0.5$ from the first
+component (where $\mu_1=0$) and $\mu_2 = 2(0+1)+0.5=2.5$ for the active bound
+$x_2=0$.
+
+\begin{table}[ht]
+\centering
+\begin{tabular}{@{}llp{6.5cm}@{}}
+\toprule
+Option & Default & Meaning \\
+\midrule
+\texttt{initial\_penalty} & $10$ & $\rho_0$ \\
+\texttt{penalty\_growth} & $10$ & $\gamma$, factor applied to $\rho$ when progress stalls \\
+\texttt{max\_penalty} & $10^{10}$ & $\rho_{\max}$ \\
+\texttt{required\_decrease} & $0.25$ & $\tau$ in the test $V_k>\tau V_{k-1}$ \\
+\texttt{initial\_inner\_tolerance} & $10^{-1}$ & $\varepsilon_0$ (never below \texttt{tolerance}) \\
+\texttt{max\_inner\_iter} & $1000$ & L-BFGS iterations per subproblem \\
+\texttt{lbfgs\_memory} & $10$ & $M$, number of stored pairs \\
+\bottomrule
+\end{tabular}
+\caption{Fields of \texttt{AugmentedLagrangianOptions}.}
+\end{table}
+
+The result type \texttt{AugmentedLagrangianResult} reports \texttt{x},
+\texttt{lambda\_eq}, \texttt{mu\_ineq}, \texttt{objective},
+\texttt{constraint\_violation} ($V_k$),
+\texttt{stationarity}, the final \texttt{penalty}, the outer and total inner
+iteration counts, and \texttt{converged}.
+
+\subsection{Sequential quadratic programming}
+\texttt{SQP} has the same constructor and
+\texttt{optimize} signature as \texttt{AugmentedLagrangian}, so switching
+between them is a one-word change:
+\begin{lstlisting}
+#include <nabia/optimization/convex/SQP.h>
+
+SQP solver(std::move(params), f, grad_f);
+Eigen::VectorXd x = solver.optimize(x0);           // x0 may be infeasible
+const auto& r = solver.result();   // r.lambda_eq, r.mu_ineq, r.evaluations, ...
+\end{lstlisting}
+\texttt{SQPOptions} holds \texttt{qp\_tolerance} ($10^{-10}$), \texttt{qp\_max\_iter} (200),
+the line-search constants \texttt{merit\_c1} ($10^{-4}$), \texttt{backtrack} (0.5) and
+\texttt{max\_line\_search} (40), and the merit penalty settings \texttt{initial\_merit\_penalty} ($\nu_0=1$) and
+\texttt{merit\_penalty\_margin} ($\delta=10^{-3}$). \texttt{SQPResult} reports the solution,
+the multipliers, the three KKT residuals, and the iteration and evaluation counts.
+
+\subsection{L-BFGS on its own}
+\begin{lstlisting}
+#include <nabia/optimization/convex/LBFGS.h>
+
+// Rosenbrock, using a single callback for value and gradient.
+auto fg = [](const Eigen::VectorXd& z, Eigen::VectorXd& grad) {
+    const double x = z(0), y = z(1);
+    grad(0) = -2.0 * (1.0 - x) - 400.0 * x * (y - x * x);
+    grad(1) = 200.0 * (y - x * x);
+    return (1.0 - x) * (1.0 - x) + 100.0 * (y - x * x) * (y - x * x);
+};
+Eigen::VectorXd x0(2);  x0 << -1.2, 1.0;
+
+LBFGS solver(std::make_unique<LBFGSParams>(LBFGSParams{2}), fg);
+Eigen::VectorXd x = solver.optimize(x0);           // x = (1, 1)
+if (!solver.result().converged()) { /* inspect solver.result().status */ }
+\end{lstlisting}
+\texttt{LBFGSParams} holds \texttt{dim}, \texttt{tolerance} (default
+$10^{-8}$), \texttt{max\_iter} ($1000$), \texttt{memory} ($10$) and the line-search
+constants \texttt{armijo\_c1}, \texttt{backtrack}, \texttt{max\_line\_search}, \texttt{flat\_tolerance}
+($\epsilon_f$) and \texttt{wolfe\_c2} ($\sigma$).
+\texttt{LBFGSResult::status} is \texttt{Converged}, \texttt{MaxIterations} or
+\texttt{LineSearchFailed}.
+
+\subsection{Scaling advice}
+The method is invariant to neither the scaling of $f$ nor that of the
+constraint rows. If the rows of $\Aeq,\Ain$ have very different norms, or $f$
+takes values far from $O(1)$, normalize them first, since $\rho_0=10$ and
+the tolerances assume a well-scaled problem. If the solver ends with
+\texttt{converged == false} and a large \texttt{penalty}, the problem may be
+infeasible or badly scaled.
+
+%==============================================================================

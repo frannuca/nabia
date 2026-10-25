@@ -47,8 +47,10 @@ target_link_libraries(_rb_backtest PRIVATE rb_backtest_core)
 nabia_set_warnings(_rb_backtest)
 
 if(SKBUILD)
-    install(TARGETS _core _rb_backtest LIBRARY DESTINATION nabia_python_bridge)
-    install(DIRECTORY nabia_python_bridge/ DESTINATION nabia_python_bridge
+    # Component "python": pyproject.toml installs only this component into the wheel, so the install
+    # rules of fetched dependencies (Eigen's headers, ...) never add files to it.
+    install(TARGETS _core _rb_backtest LIBRARY DESTINATION nabia_python_bridge COMPONENT python)
+    install(DIRECTORY nabia_python_bridge/ DESTINATION nabia_python_bridge COMPONENT python
         FILES_MATCHING PATTERN "*.py" PATTERN "__pycache__" EXCLUDE)
 else()
     set_target_properties(_core _rb_backtest PROPERTIES

@@ -1,0 +1,449 @@
+% Part VII: the sentiment-modulated risk-budgeting pipeline (nabia_python/nabia/sentiment_rb).
+
+\chapter{Overview of the pipeline}\label{ch:rb-overview}
+
+The pipeline implements the specification \code{doc/sentiment\_risk\_budgeting\_spec.md}: each portfolio asset
+(equity, commodity, government bond, credit) is mapped to a set of sentiment indicators, inherited down an
+indicator tree; an elastic net per asset aggregates them into one sentiment score; the score is normalized to
+$[0,1]$ and modulates the asset's risk budget, or, in long-short mode, decides whether the asset is held long or
+short; a risk-budgeting optimizer turns budgets into weights; the result is backtested against plain equal risk
+contribution (ERC). News sentiment comes from a language model. Every numerical step that the C++ library
+implements runs in the \code{nabia\_python\_bridge} wheel:
+\begin{center}\small
+\begin{tabularx}{\linewidth}{@{}l X l@{}}
+\toprule
+Step & Method & nabia \\
+\midrule
+News aggregation, volatility, smoothing & exponentially weighted averages & \code{signal.exponential\_moving\_average} \\
+Elastic net per asset & coordinate descent, $(\alpha,\lambda)$ grid, purged walk-forward CV, block bootstrap & \code{RegressionEngine} (\code{frames.regress}) \\
+Normalization (option) & $\Phi(S/\hat\sigma_S)$ & \code{stats.normal\_cdf} \\
+Weights & risk budgeting (Spinu), risk contributions & \code{risk.RiskBudgeting}, \code{risk.Volatility} \\
+Long-only backtest, ERC benchmark & walk-forward engine with a budget schedule & \code{frames.backtest} \\
+Metrics & Sharpe, drawdown, turnover, \dots & \code{strategy.compute\_performance} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+pandas and numpy do the bookkeeping (alignment, rolling z-scores, ranks, correlations). The long-short backtest
+runs on a small simulator that repeats the engine's accounting with a direction per asset
+(\S\ref{sec:rb-simulator}).
+
+\paragraph{Data flow.} For one configuration, \code{run} (\coderef{rb_run}) executes:
+\begin{enumerate}
+  \item synthetic point-in-time market data, indicators and news (Chapter~\ref{ch:rb-synthetic});
+  \item the news pipeline: dedup, triage, scoring, daily digest, node features (Chapter~\ref{ch:rb-news});
+  \item point-in-time transforms and the candidate features of each asset (Chapter~\ref{ch:rb-features});
+  \item the walk-forward elastic net, the score $S$ and its normalization $s$ (Chapter~\ref{ch:rb-model});
+  \item budgets or directions, the weights and the backtests (Chapter~\ref{ch:rb-portfolio});
+  \item tables, CSV outputs and figures.
+\end{enumerate}
+\snippet{rb_run}{Python}{The pipeline for one configuration}
+
+\paragraph{Code layout} (\code{nabia\_python/nabia/sentiment\_rb}):
+\begin{center}\small
+\begin{tabularx}{\linewidth}{@{}l l X@{}}
+\toprule
+Folder & Files & Area \\
+\midrule
+--- & \code{config.py}, \code{pipeline.py}, \code{\_\_main\_\_.py} & settings, \code{run()}, command line and sweep \\
+\code{data/} & \code{synthetic.py} & synthetic market data, indicators and news \\
+\code{features/} & \code{tree.py}, \code{transforms.py} & indicator tree; point-in-time transforms, candidate features, target \\
+\code{llm/} & \code{schemas.py}, \code{client.py}, \code{news.py} & output schemas; mock or Anthropic client; dedup, scoring, node features \\
+\code{model/} & \code{elastic\_net.py} & elastic net per asset, walk-forward $S$ and $s$ \\
+\code{portfolio/} & \code{budgets.py}, \code{backtest.py} & budgets and directions; backtests, simulator, checks \\
+\code{report/} & \code{tables.py}, \code{figures.py} & report tables and CSV; figures \\
+\code{prompts/} & \code{triage\_v1.md}, \dots & versioned prompt files (system and user templates) \\
+\bottomrule
+\end{tabularx}
+\end{center}
+All settings are in one dictionary, \code{CONFIG} (\coderef{rb_config}); \code{load\_config}
+(\coderef{rb_load_config}) deep-merges a JSON file of overrides, so taxonomy, features, horizons, bounds, models
+and the normalization method change without code edits.
+
+%==============================================================================
+\chapter{Indicator tree, point-in-time features and target}\label{ch:rb-features}
+
+\section{The indicator tree}
+The taxonomy is a tree of nodes: \code{L0.GLOBAL} (global risk appetite) at the root; the asset classes
+\code{L1.EQ}, \code{L1.CMD}, \code{L1.FI}; buckets \code{L2.*} (US and European equities, energy, precious
+metals, 10-year Treasuries, high yield); and one node per underlying \code{L3.*}. Each node has a parent; the
+ancestors of $n$ are $\anc(n)=\{n,\text{parent}(n),\dots,\code{L0.GLOBAL}\}$ (\coderef{rb_ancestors}). Asset $i$
+sits at an L3 node $n_i$ and belongs to an asset class $c(i)\in\{\mathrm{EQ},\mathrm{CMD},\mathrm{GOVT},\mathrm{CREDIT}\}$.
+
+Every feature $k$ is attached to a node $\nu(k)$ and carries a \emph{sign per asset class} $\sigma_{k,c}\in\{-1,0,1\}$
+that orients it: after orientation, higher means more bullish for the asset's price. Risk-off is bullish for
+government bonds, so a risk-appetite indicator has $\sigma_{k,\mathrm{GOVT}}=-1$. The candidate features of asset
+$i$ are those of all its ancestors that are not switched off for its class:
+\[
+  \mathcal F_i=\{\,k:\ \nu(k)\in\anc(n_i),\ \sigma_{k,c(i)}\ne0\,\}.
+\]
+Each feature enters once (the matrix is keyed by feature), which the tests check
+(\code{test\_assets\_inherit\_every\_ancestor\_feature\_once}).
+\snippet{rb_asset_matrix}{Python}{Candidate features of an asset, oriented}
+
+\section{Point-in-time alignment and transforms}
+A value observed for date $t$ (\emph{as of} $t$) becomes usable $\ell_k$ days later (\emph{available at}
+$t+\ell_k$): a COT report three days, financial-conditions indices five, LLM features one day after the news is
+received. The usable series is therefore $\tilde x_{k,t}=x_{k,t-\ell_k}$, and nothing earlier than its
+availability is ever used. The series is then made stationary and standardized:
+\[
+  u_{k,t}=\begin{cases}\tilde x_{k,t}-\tilde x_{k,t-5}&\text{(transform ``diff'')}\\ \tilde x_{k,t}&\text{(transform ``z'')}\end{cases},
+  \qquad
+  z_{k,t}=\operatorname{clip}_{[-3,3]}\!\left(\frac{u_{k,t}-m_t^{(W)}(u_k)}{s_t^{(W)}(u_k)}\right),
+\]
+with the rolling mean $m^{(W)}$ and standard deviation $s^{(W)}$ over $W=756$ trading days (about three years,
+at least 252 observations). Rolling, not full-sample, statistics keep every value point in time. The oriented
+feature of asset $i$ is $\hat z^{(i)}_{k,t}=\sigma_{k,c(i)}\,z_{k,t}$.
+\snippet{rb_transform}{Python}{Point in time, stationary, rolling z-score}
+
+\section{The target}
+The elastic net predicts the forward vol-scaled return over $h=21$ days,
+\[
+  y_{i,t}=\frac{P_{i,t+h}/P_{i,t}-1}{\hat\sigma_{i,t}\sqrt h},\qquad
+  \hat\sigma_{i,t}^2=\operatorname{EWMA}_{H=20}\big(r_{i,\cdot}^2\big)_t ,
+\]
+where the exponentially weighted mean of squared daily returns (half-life 20 days, smoothing factor
+$\alpha=1-2^{-1/20}$) comes from \code{signal.exponential\_moving\_average}. Scaling by volatility makes targets
+comparable across assets and calm or turbulent periods. $y_{i,t}$ is only known at $t+h$, which the training
+windows respect (\S\ref{sec:rb-purge}).
+\snippet{rb_target}{Python}{Vol-scaled forward return}
+\begin{codepointers}
+  \codeitem{rb_build_features}{all features: indicators, node LLM features, digest outputs}
+  \codeitem{rb_node_sign}{orientation of the latent factors (synthetic data)}
+\end{codepointers}
+
+%==============================================================================
+\chapter{The LLM news pipeline}\label{ch:rb-news}
+
+\section{Prompts, schemas and the client}
+Three prompts, stored as versioned files in \code{prompts/} (system and user templates, separated by a marker):
+\begin{description}
+  \item[A, triage] (a small model): is the article relevant, which taxonomy nodes does it concern, with which
+        relevance and channel (\emph{direct}: the node's asset is the subject; \emph{spillover}: affected through
+        a sector, competitor or macro link). Market recaps are marked irrelevant.
+  \item[B, scoring] (a stronger model): for each node, the sentiment in $[-1,1]$ for the asset's price over the
+        next 1--20 trading days, a confidence, magnitude, horizon, surprise versus expectations, fact type and a
+        short rationale. Government bonds: hawkish policy and upside inflation are negative.
+  \item[C, digest] (one call per day, on the day's deduplicated headlines): risk appetite, growth tone, inflation
+        tone, geopolitical stress, credit tone, central-bank tone per bank, commodity supply tone per complex.
+\end{description}
+Each response is validated against a pydantic schema (\coderef{rb_triage_schema}, \coderef{rb_score_schema},
+\coderef{rb_digest_schema}): numbers in range, categories from closed lists. A malformed response is retried up to
+twice, then logged and skipped. Every call is appended to \code{llm\_audit.jsonl} with the prompt version (file
+name and hash of its text), the model, a hash of the request, the article or date it concerns, the attempt, and
+the raw response, so each score can be reproduced or re-scored. Templates are filled by \code{fill}
+(\coderef{rb_fill}).
+\snippet{rb_llm_call}{Python}{One LLM call: fill, call, validate, retry, audit}
+With \code{--live}, the call goes to the Anthropic API at temperature 0, with the output forced through a tool whose
+input schema is the pydantic schema, and the system prompt cached; the SDK retries rate limits and server errors
+with exponential backoff. Offline, \code{mock\_response} (\coderef{rb_mock}) answers from the synthetic truth of
+the article, with noise, and returns 1\% of first attempts malformed so the retry path is exercised.
+\snippet{rb_llm_anthropic}{Python}{The Anthropic call: structured output through a tool}
+\paragraph{Look-ahead.} A model trained after an article's date may ``know'' what followed. The pipeline offers
+anonymization (entity names replaced by \emph{Entity k} in every prompt, the mapping to node IDs kept outside the
+model), and limits live scoring to recent news (\code{llm.live\_days}); out-of-sample performance after the model's
+training cutoff is the real validation.
+
+\section{Deduplication and novelty}
+A story is often published several times. Each headline is embedded as a hashed bag of words: tokens are
+hashed into $d=256$ buckets, counted and normalized, $v_a\in\mathbb R^{256}$, $\|v_a\|=1$ (\coderef{rb_embed}).
+Article $a$ joins the cluster of an earlier article $b$ received within 48 hours if $v_a^\top v_b>0.9$. Its
+\emph{novelty} is
+\[
+  \nu_a=\frac1{1+n_a},
+\]
+with $n_a$ the number of earlier articles of its cluster in the window: 1 for a new story, $\tfrac12$ for the
+first repeat, and so on.
+\snippet{rb_dedup}{Python}{Clusters and novelty}
+
+\section{Weights and decay-weighted aggregation}
+Each (article, node) score $s_a$ gets the weight
+\[
+  w_a=\text{relevance}_a\times\text{confidence}_a\times\nu_a\times\omega_{\text{source}(a)},
+\]
+with source weights $\omega$ (wire 1, newspaper 0.8, blog 0.4). The node's sentiment on day $t$ is the
+decay-weighted mean of the scores received up to $t$:
+\begin{equation}\label{eq:rb-decay}
+  \bar s_{n,t}=\frac{\sum_{a:\,t_a\le t}w_a\,s_a\,e^{-\lambda(t-t_a)}}{\sum_{a:\,t_a\le t}w_a\,e^{-\lambda(t-t_a)}},
+  \qquad \lambda=\frac{\ln 2}{H},\quad H=3\text{ days}.
+\end{equation}
+\snippet{rb_weights}{Python}{Weight of each (article, node) score}
+\begin{proposition}\label{prop:rb-ema}
+Let $X_t=\sum_{a:\,t_a=t}w_as_a$ and $W_t=\sum_{a:\,t_a=t}w_a$ be the day sums, and $E(x)$ the exponential moving
+average with smoothing factor $\alpha=1-e^{-\lambda}$ started from zero,
+$E_t=\alpha x_t+(1-\alpha)E_{t-1}$, $E_{-1}=0$. Then $\bar s_{n,t}=E_t(X)/E_t(W)$ whenever $E_t(W)>0$.
+\end{proposition}
+\begin{proof}
+Unrolling the recursion, $E_t(x)=\alpha\sum_{j\le t}(1-\alpha)^{t-j}x_j=\alpha\sum_{j\le t}e^{-\lambda(t-j)}x_j$.
+Substituting the day sums, $E_t(X)=\alpha\sum_{a}w_as_ae^{-\lambda(t-t_a)}$ and
+$E_t(W)=\alpha\sum_{a}w_ae^{-\lambda(t-t_a)}$; the factor $\alpha$ cancels in the ratio, which is
+\eqref{eq:rb-decay}.
+\end{proof}
+The code therefore computes the aggregation with nabia's EWMA, prepending a zero so that it starts from $E_{-1}=0$:
+\snippet{rb_ema0}{Python}{Zero-started EWMA (nabia)}
+
+\section{The five features per node}
+For every node $n$ and day $t$:
+\begin{center}\small
+\begin{tabular}{@{}l l l@{}}
+\toprule
+Feature & Definition & Orientation \\
+\midrule
+\code{llm\_level} & $\bar s_{n,t}$, eq.~\eqref{eq:rb-decay} & $+$ \\
+\code{llm\_volume} & $\log(1+N_{n,t})$, $N$ the day's relevant articles & $-$ (attention spikes on bad news) \\
+\code{llm\_dispersion} & standard deviation of the day's scores & $-$ (disagreement) \\
+\code{llm\_mom5} & $\bar s_{n,t}-\bar s_{n,t-5}$ & $+$ \\
+\code{llm\_surprise} & $\bar s_{n,t}-\frac1{60}\sum_{j<60}\bar s_{n,t-j}$ & $+$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+LLM sentiment is defined with respect to the price of the node's asset, so its sign is $+1$ for the node's subtree,
+except at \code{L0.GLOBAL}, where it is risk appetite and takes the risk-on sign of each class. Like every indicator
+they are lagged (one day), z-scored and oriented (Chapter~\ref{ch:rb-features}).
+\snippet{rb_node_features}{Python}{The five LLM features of every node}
+
+\section{The daily digest}
+Prompt C's outputs become features of their node, with a sign per class, e.g. inflation tone negative for equities,
+bonds and credit but positive for commodities, a hawkish Fed negative for everything, energy supply tightening
+positive for the energy bucket (\code{digest\_features} in \coderef{rb_config}). Null outputs (no relevant news for
+a central bank) count as neutral.
+\begin{codepointers}
+  \codeitem{rb_run_news}{the news pipeline: dedup, triage, scoring, digests}
+\end{codepointers}
+
+%==============================================================================
+\chapter{Elastic net per asset and the sentiment score}\label{ch:rb-model}
+
+\section{The model}
+For each asset $i$ and refit date $T$, the elastic net (Chapter~\ref{ch:en}) is fitted on the oriented
+candidates $\hat z^{(i)}_{k,t}$, $k\in\mathcal F_i$:
+\[
+  \min_{\beta_0,\beta}\ \frac1{2n}\sum_{t\in\mathcal T_T}\big(y_{i,t}-\beta_0-\textstyle\sum_k\beta_k\hat z^{(i)}_{k,t}\big)^2
+  +\lambda\Big(\alpha\|\beta\|_1+\tfrac{1-\alpha}2\|\beta\|_2^2\Big),
+\]
+with standardized features, $\alpha\in\{0.1,0.3,0.5,0.7,0.9\}$ and a $\lambda$ path, chosen by cross-validation.
+The fit is nabia's regression engine (\code{frames.regress}) with all candidates in one subset, so the engine tunes
+only $(\alpha,\lambda)$.
+
+\section{Purged walk-forward training}\label{sec:rb-purge}
+Targets overlap: $y_{i,t}$ spans $t+1,\dots,t+h$. Two precautions keep the future out:
+\begin{enumerate}
+  \item \textbf{The training rows end $h$ days before the refit date}: $\mathcal T_T=\{t\le T-h\}$, the rows whose
+        target is known at $T$ (an assertion checks it). The window is expanding (or rolling, by configuration),
+        and starts once enough history exists for the z-scores; a missing z-score counts as neutral (0).
+  \item \textbf{Walk-forward cross-validation with a gap}: the engine's folds train on the past and validate on
+        the next block, with $h$ rows removed between them (\code{validation\_gap}), the analogue of
+        \code{TimeSeriesSplit(gap=h)}.
+\end{enumerate}
+Refits happen at the end of each quarter (or month); the assets of one refit date are fitted in parallel threads,
+since the engine releases Python's GIL.
+\snippet{rb_fit_at}{Python}{Training rows of one refit: purged and point in time}
+
+\section{Positivity and stability selection}
+The features are pre-oriented, so a negative coefficient would be a nonsensical sign flip; the specification asks
+for $\beta\ge0$. nabia's elastic net has no sign constraint, so the pipeline applies it by elimination: fit, drop
+the features with $\beta_k<0$, refit, until all coefficients are non-negative. At the same time it applies
+\emph{stability selection}: each fit includes a moving-block bootstrap of $B=50$ samples (blocks of $h$ rows, so
+overlapping targets stay together), and the selection frequency
+\[
+  \pi_k=\frac1B\sum_{b=1}^B\one\big[\beta^{(b)}_k\ne0\big]
+\]
+must exceed $0.6$; features below are dropped and the model refitted. If nothing survives, $\beta=0$: the asset's
+score is neutral.
+\snippet{rb_fit_asset}{Python}{Elastic net with positivity and stability selection}
+
+\section{The score and its normalization}
+With the coefficients of the latest refit, the sentiment score is the prediction minus the intercept,
+\[
+  S_{i,t}=\sum_{k\in\mathcal F_i}\beta_{ik}\,\hat z^{(i)}_{k,t},
+\]
+so all-zero coefficients give $S=0$. It is normalized to $[0,1]$ without full-sample statistics, which would look
+ahead and be dominated by outliers:
+\begin{description}
+  \item[Rolling percentile] (default): the share of the last $L=756$ scores (computed with the current
+        coefficients) below today's, counting ties as half,
+        \[
+          s^{\mathrm{ts}}_{i,t}=\frac1L\sum_{u=t-L}^{t-1}\Big(\one[S_{i,u}<S_{i,t}]+\tfrac12\,\one[S_{i,u}=S_{i,t}]\Big).
+        \]
+        The mid-rank makes a constant score (an asset without features) exactly neutral, $s=\tfrac12$.
+  \item[Normal CDF]: $s^{\mathrm{ts}}_{i,t}=\Phi\big(S_{i,t}/\hat\sigma_{S,t}\big)$, with the rolling standard
+        deviation $\hat\sigma_S$ (\code{stats.normal\_cdf}).
+\end{description}
+An optional cross-sectional rank across assets,
+$s^{\mathrm{xs}}_{i,t}=(\operatorname{rank}_i S_{\cdot,t}-1)/(N-1)$, is blended,
+$s=\alpha_{\mathrm{ts}}s^{\mathrm{ts}}+(1-\alpha_{\mathrm{ts}})s^{\mathrm{xs}}$ ($\alpha_{\mathrm{ts}}=1$ by default),
+and the result is smoothed by an EWMA with a 5-day half-life. Every value is checked to lie in $[0,1]$.
+\snippet{rb_normalize}{Python}{Score and rolling percentile with the current coefficients}
+\snippet{rb_blend}{Python}{Cross-sectional blend and EWMA smoothing}
+
+\section{In-sample and out-of-sample diagnostics}
+For every refit, the pipeline records the information coefficient (IC, the correlation of the score with the
+realized target) on the training rows and on the next, unseen block. In-sample IC above out-of-sample IC measures
+overfitting; the report also gives the IC of $S$ and of $s$ per asset and pooled over the whole out-of-sample
+period, and the pooled IC of each LLM feature.
+\begin{codepointers}
+  \codeitem{rb_walk_forward}{walk-forward refits, scores, normalization, IC records}
+  \codeitem{rb_tables}{report tables: comparison, IC, snapshot, selection frequencies}
+\end{codepointers}
+
+%==============================================================================
+\chapter{From sentiment to positions}\label{ch:rb-portfolio}
+
+\section{Risk budgeting}
+Given a covariance $\Sigma$ and budgets $b_i>0$, $\sum_ib_i=1$, the risk-budgeting portfolio
+(Chapter~\ref{c:sec:riskbudgeting}) solves
+\[
+  \min_{w>0}\ R(w)-\sum_ib_i\ln w_i,\qquad R(w)=\sqrt{w^\top\Sigma w},
+\]
+and is rescaled to sum to one. At the optimum the relative risk contributions equal the budgets:
+\[
+  \mathrm{RC}_i(w)=\frac{w_i(\Sigma w)_i}{w^\top\Sigma w}=b_i .
+\]
+(The specification's $\tfrac12w^\top\Sigma w$ gives the same weights up to scale.) The pipeline checks this at
+every rebalance with nabia's \code{RiskBudgeting} to $10^{-4}$; observed errors are below $10^{-8}$
+(\coderef{rb_check_rc}).
+
+\section{Long-only: modulated budgets}
+With base budgets $b^0$ (ERC weights per asset) and normalized sentiment $s_i$,
+\[
+  b_i=\frac{b_i^0\,\big(m_{\min}+(m_{\max}-m_{\min})\,s_i\big)}{\sum_jb_j^0\,\big(m_{\min}+(m_{\max}-m_{\min})\,s_j\big)},
+  \qquad m_{\min}=0.5,\ m_{\max}=1.5,
+\]
+so neutral sentiment ($s=\tfrac12$) keeps $b^0$ and the multiplier ranges over $[0.5,1.5]$. Budgets stay strictly
+positive (the log barrier needs $b>0$). The change per rebalance is capped at $\pm25\%$ relative: the budgets are
+clipped to $[b^{\mathrm{prev}}(1-c),\,b^{\mathrm{prev}}(1+c)]$ and renormalized, repeatedly.
+\snippet{rb_modulate}{Python}{Budget modulation with a change cap}
+
+\section{Long-short: directions}\label{sec:rb-longshort}
+In long-short mode, sentiment decides the side of each position and the budgets stay $b^0$ (optionally scaled by
+conviction, $s_i$ for a long and $1-s_i$ for a short). The direction $d_i\in\{+1,-1\}$ follows a neutral band with
+hysteresis, so an asset hovering around one threshold does not flip back and forth:
+\[
+  d_{i,t}=\begin{cases}-1&s_{i,t}<s_{\mathrm{short}}\ (0.35)\\ +1&s_{i,t}>s_{\mathrm{long}}\ (0.5)\\ d_{i,t^-}&\text{otherwise.}\end{cases}
+\]
+\snippet{rb_directions}{Python}{Directions with hysteresis}
+A short position earns $-r_i$. With $D=\operatorname{diag}(d)$, the directed returns are $Dr$, whose covariance is
+$\Sigma'=D\Sigma D$: a shorted asset's correlations with the others change sign, so it is sized as the hedge or
+diversifier it becomes. The optimizer runs on $\Sigma'$ and returns positive exposures $w'$; the weights are
+$w=Dw'$.
+\begin{proposition}\label{prop:rb-short}
+Let $w'>0$ be the risk-budgeting solution on $\Sigma'=D\Sigma D$ with budgets $b$, and $w=Dw'$. Then the risk
+contributions of $w$ on the original covariance equal the budgets: $\mathrm{RC}_i(w;\Sigma)=b_i$. Every position,
+long or short, carries its risk budget.
+\end{proposition}
+\begin{proof}
+Since $d_i^2=1$, $w^\top\Sigma w=w'^\top D\Sigma Dw'=w'^\top\Sigma'w'$ and
+$w_i(\Sigma w)_i=d_iw'_i(\Sigma Dw')_i=w'_i\,(D\Sigma Dw')_i=w'_i(\Sigma'w')_i$. Hence
+$\mathrm{RC}_i(w;\Sigma)=\mathrm{RC}_i(w';\Sigma')=b_i$ by optimality of $w'$.
+\end{proof}
+\snippet{rb_solve}{Python}{Risk budgeting on $D\Sigma D$ (nabia)}
+
+\section{The long-short simulator}\label{sec:rb-simulator}
+nabia's backtest engine has no notion of direction, and directions change between rebalances while the covariance
+window spans several of them, so flipping columns of its input would mix signs within one window. The simulator
+\code{simulate} repeats the engine's accounting (Chapter~\ref{c:sec:engine}) and applies the current directions to
+the whole trailing window at each rebalance:
+\begin{itemize}
+  \item \textbf{Covariance}, the engine's estimator: weights $\omega_j\propto2^{-a_j/H}$ for a row of age $a_j$
+        (half-life $H=60$; equal weights for the sample estimator), normalized, and
+        \[
+          \hat\Sigma=\frac{\sum_j\omega_j(r_j-\bar r)(r_j-\bar r)^\top}{1-\sum_j\omega_j^2},\qquad\bar r=\sum_j\omega_jr_j ,
+        \]
+        over $W=252$ rows (\coderef{rb_window_cov}).
+  \item \textbf{Rebalances} at rows $W-1+kf$, $f=21$; the budgets and directions in force are the last schedule row
+        at or before the date.
+  \item \textbf{Drift}: between rebalances each holding grows with its return,
+        $w\leftarrow w\circ(1+r_t)/(1+w^\top r_t)$; short weights drift the same way.
+  \item \textbf{Costs}: at a rebalance the turnover is $\tau=\|w^\ast-w\|_1$ and the cost $c\,\tau$ ($c=5$ bp); the
+        net return is $(1+w^\top r_t)(1-c\tau)-1$.
+  \item \textbf{Metrics} from the first trade on, with nabia's \code{compute\_performance}.
+\end{itemize}
+Run with all-long directions, the simulator reproduces nabia's engine: equity to $6.5\times10^{-10}$, weights to
+$6\times10^{-9}$, identical Sharpe ratio. The long-only path asserts this on every run, and a test checks it on
+independent data (\coderef{rb_test_simulator}); \coderef{rb_test_short} checks Proposition~\ref{prop:rb-short}.
+\snippet{rb_simulate}{Python}{The engine's accounting with directions}
+\snippet{rb_backtests}{Python}{Benchmark and overlay: same covariance, rebalancing and costs}
+
+%==============================================================================
+\chapter{Synthetic data, experiments and results}\label{ch:rb-synthetic}
+
+\section{Synthetic market data}
+So that the pipeline runs offline and its behaviour can be tested against a known truth, the data are synthetic
+(\coderef{rb_synthetic_market}). Every taxonomy node $n$ has a latent factor, a standardized AR(1),
+$f_{n,t}=\phi f_{n,t-1}+\sqrt{1-\phi^2}\,\varepsilon_{n,t}$, $\phi=0.97$ (half-life about three weeks). Asset $i$'s
+daily return is
+\[
+  r_{i,t}=\frac{\sigma_i}{\sqrt{252}}\Big(\kappa\,\frac{\sum_{n\in\anc(n_i)}\sigma^{\mathrm{f}}_{n,c(i)}f_{n,t}}{\sqrt{|\anc(n_i)|}}
+  +\ell_{c(i)}\,g_t+\sqrt{1-\ell_{c(i)}^2}\,\eta_{i,t}\Big)+\mathrm{SR}_{c(i)}\frac{\sigma_i}{252},
+\]
+with annual volatilities $\sigma_i$, signal strength $\kappa=0.15$, a common shock $g$ with class loadings $\ell$
+(government bonds negative), and a risk premium of Sharpe ratio $\mathrm{SR}$ per class; the factor sign
+$\sigma^{\mathrm f}$ is the risk-on sign at \code{L0.GLOBAL} and $+1$ below. Each indicator is a noisy reading of
+its node's factor with a slowly drifting level (or, for transform ``diff'', a stock whose changes carry the signal);
+some indicators are pure noise, for the model to discard.
+
+\section{Synthetic news with a known skill}\label{sec:rb-oracle}
+The default news generator is an \emph{oracle} with a set skill (\coderef{rb_news_truth}). For node $n$, let
+$x_{n,t}$ be the mean over its assets of the oriented forward target, shifted by the LLM lag so that it starts when
+the news becomes usable, and $z_{n,t}$ its standardized value. The node's true tone is
+\[
+  T_{n,t}=\rho\,z_{n,t}+\sqrt{1-\rho^2}\,\epsilon_{n,t},\qquad\operatorname{corr}(T_{n,t},z_{n,t})=\rho ,
+\]
+where $\rho$ is the \emph{news IC} (\code{synthetic.sentiment\_ic}, 0.2 by default): 0 is pure noise, 1 perfect
+foresight. About four articles a day are drawn (more often for global and asset-class nodes), each with tone
+$\tanh(T_{n,t}+0.3\,\epsilon_a)$; 12\% are market recaps (irrelevant) and 10\% re-publications (duplicates); the mock
+LLM adds scoring noise; the digest derives from the same truths. The rest of the pipeline is unchanged: it must find
+the edge through point-in-time features, the purged elastic net, normalization and the budget rules. Setting
+\code{"sentiment": "latent"} ties the news to the latent factors instead.
+\snippet{rb_news_truth}{Python}{Oracle news truth}
+
+\paragraph{The information coefficient.} The IC of a signal is its correlation with the subsequent realized return,
+here $\operatorname{corr}(S_{i,t},y_{i,t})$, per asset or pooled over assets. Real signals have ICs of a few percent;
+by the fundamental law of active management the information ratio grows roughly like
+$\mathrm{IC}\times\sqrt{\text{breadth}}$, so small ICs applied often can matter.
+
+\section{Results}
+The figures and tables below come from runs with the default configuration (seed 7); \code{doc/build.sh --figures}
+regenerates them. Signals start in 2018 after the warm-up of the z-scores and the first training window.
+
+\pipelinefigure{lo_portfolio.png}{Long-only overlay against plain ERC (news IC 0.2): cumulative PnL net of costs,
+rolling one-year Sharpe ratio, drawdown, return by year. Shaded: the covariance warm-up before the first
+out-of-sample signal.}{fig:rb-lo-portfolio}
+\pipelinefigure{lo_budgets.png}{Long-only: modulated budgets against $b^0$, normalized sentiment, weights and
+cumulative risk contributions (which track the budgets).}{fig:rb-lo-budgets}
+\pipelinefigure{lo_model.png}{Elastic net diagnostics: in-sample against out-of-sample IC per asset and per refit,
+and the share of refits in which each feature has a non-zero coefficient.}{fig:rb-lo-model}
+
+\IfFileExists{figures/comparison_long_only.tex}{\begin{table}[htbp]\centering\small
+\caption{Long-only overlay against plain ERC (news IC 0.2).}\label{tab:rb-lo}\input{figures/comparison_long_only.tex}
+\end{table}}{}
+\IfFileExists{figures/comparison_long_short.tex}{\begin{table}[htbp]\centering\small
+\caption{Long-short overlay against plain ERC (news IC 0.2).}\label{tab:rb-ls}\input{figures/comparison_long_short.tex}
+\end{table}}{}
+
+\paragraph{Does correct sentiment produce alpha?} The sweep reruns the pipeline on the same market data for several
+news ICs. Overlay Sharpe ratio and excess return over ERC grow with the news IC; below an IC of about 0.1 the
+elastic net mostly cannot separate the news from noise, and the market indicators alone give a small edge.
+\IfFileExists{figures/sweep_long_only.tex}{\begin{table}[htbp]\centering\small
+\caption{News-quality sweep, long-only (ERC Sharpe ratio for reference).}\label{tab:rb-sweep-lo}
+\input{figures/sweep_long_only.tex}\end{table}}{}
+\IfFileExists{figures/sweep_long_short.tex}{\begin{table}[htbp]\centering\small
+\caption{News-quality sweep, long-short.}\label{tab:rb-sweep-ls}
+\input{figures/sweep_long_short.tex}\end{table}}{}
+\pipelinefigure{sweep_long_only.png}{Long-only sweep: Sharpe ratio, excess return and realized IC against the
+news IC.}{fig:rb-sweep-lo}
+\pipelinefigure{sweep_long_short.png}{Long-short sweep.}{fig:rb-sweep-ls}
+\pipelinefigure{ls_budgets.png}{Long-short: budgets stay $b^0$; the sentiment panel shades the neutral band;
+negative weights are short positions.}{fig:rb-ls-budgets}
+
+\paragraph{Reading the results.} Long-only modulation can at most halve or increase by half a budget, capped at
+25\% per rebalance, so even good news moves the allocation modestly. Long-short acts on the direction of the view
+and captures much more of it, at the price of turnover (several times a year) and costs; with uninformative news it
+earns almost nothing, which also shows that no future information leaks through the pipeline. The ERC benchmark's
+negative return is a property of this seed's synthetic premiums; only the difference matters.
+
+\section{Running and extending}
+Chapter~\ref{ch:guide} lists the commands. The command line (\coderef{rb_main}) runs one configuration or a sweep;
+figures are produced by \coderef{rb_plots} and \coderef{rb_plot_sweep}. To use real data, replace
+\code{synthetic\_market} and \code{synthetic\_news} (\coderef{rb_synthetic_news}) by loaders returning the same
+frames: returns by asset, indicator levels by \emph{as-of} date, and articles with publish and received
+timestamps; everything downstream is unchanged.
