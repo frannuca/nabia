@@ -48,7 +48,13 @@ def plots(cfg, out, bench, overlay, sched, s, b0, assets, ics, selected, signal_
     ax[0].stackplot(sched.index, sched.T.values, labels=assets, colors=colors, alpha=0.85, step="post")
     for b, c in zip(np.cumsum(b0)[:-1], colors):
         ax[0].axhline(b, color="k", ls=":", lw=0.7)
-    ax[0].set_title("risk budgets b (stacked; dotted: base budgets b0)")
+    if B["mode"] == "long_short" and not B["modulate_long_short"]:
+        ax[0].set_title("risk budgets b, fixed at b0 in long-short mode: sentiment sets the side of each position "
+                        "(see the weights below); \"modulate_long_short\": true scales them by conviction")
+    elif B["mode"] == "long_short":
+        ax[0].set_title("risk budgets b, scaled by conviction (s for longs, 1 - s for shorts; dotted: base budgets b0)")
+    else:
+        ax[0].set_title("risk budgets b (stacked; dotted: base budgets b0)")
     for a, c in zip(assets, colors):
         ax[1].plot(s[a], color=c, lw=0.8, label=a)
     ax[1].axhline(0.5, color="k", lw=0.7), ax[1].set_ylim(0, 1), ax[1].set_title("normalized sentiment s (0.5 = neutral)")
