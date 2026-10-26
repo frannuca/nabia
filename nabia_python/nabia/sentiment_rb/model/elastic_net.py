@@ -37,16 +37,21 @@ def walk_forward_scores(cfg, X_by_asset, y_by_asset, dates):
         X, lo = X_by_asset[a], 0 if M["window"] == "expanding" else max(0, p - h - M["rolling_days"])
         Xw, yw = X.iloc[lo:p - h + 1], y_by_asset[a].iloc[lo:p - h + 1]
         rows = (Xw.notna().mean(axis=1) >= 0.5) & yw.notna()  # past the z-score warm-up; missing z = neutral 0
-        assert yw[rows].index.max() + pd.tseries.offsets.BDay(h) <= dates[p], "purge: target overlaps the refit date"
+        assert not rows.any() or yw[rows].index.max() + pd.tseries.offsets.BDay(h) <= dates[p], \
+            "purge: target overlaps the refit date"
         if rows.sum() < M["min_train"]:
             return pd.Series(0.0, X.columns), np.nan
         beta = fit_asset(cfg, Xw[rows].fillna(0.0), yw[rows])
         return beta, np.corrcoef(Xw[rows].fillna(0.0).values @ beta.values, yw[rows])[0, 1] if beta.any() else np.nan
 
-    pool = ThreadPoolExecutor()  # nabia releases the GIL: the assets' fits run in parallel
+    # nabia releases the GIL, so the assets' fits run in parallel threads; "threads": 1 fits them one after the
+    # other (simpler to step through in a debugger), 0 uses one thread per core.
+    threads = M.get("threads", 0)
+    pool = ThreadPoolExecutor(max_workers=threads or None) if threads != 1 else None
+    fits = (lambda p: pool.map(lambda a: fit_at(p, a), X_by_asset)) if pool else (lambda p: map(lambda a: fit_at(p, a), X_by_asset))
     for k, p in enumerate(refits):
         stop = refits[k + 1] if k + 1 < len(refits) else len(dates) - 1
-        for a, (beta, is_ic) in zip(X_by_asset, pool.map(lambda a: fit_at(p, a), X_by_asset)):
+        for a, (beta, is_ic) in zip(X_by_asset, fits(p)):
             X, betas[(dates[p], a)] = X_by_asset[a], beta
             cur = X.fillna(0.0).values @ beta.values  # S_t with the current betas
             oos = pd.Series(cur[p + 1:stop + 1]).corr(y_by_asset[a].iloc[p + 1:stop + 1].reset_index(drop=True))

@@ -20,17 +20,28 @@ def main():
     ap.add_argument("--config", type=Path, help="JSON file overriding CONFIG keys")
     ap.add_argument("--out", type=Path, default=Path("output") / "sentiment_rb", help="default: output/sentiment_rb")
     ap.add_argument("--show", action="store_true", help="open the figures (they are always saved as PNG)")
+    ap.add_argument("--data", choices=["synthetic", "real"], help="data source (default: data.source in the config)")
+    ap.add_argument("--news", type=Path, help="news JSON file for real data (default: data.news_file)")
+    ap.add_argument("--scores", type=Path, help="news scores file (python -m nabia.news score): no model calls")
+    ap.add_argument("--llm", choices=["mock", "anthropic", "ollama"], help="LLM: offline mock (default), Anthropic or local Ollama")
+    ap.add_argument("--batch", action="store_true", help="with --live: submit uncached requests as Message Batches first")
     ap.add_argument("--ic-sweep", type=float, nargs="+", metavar="IC",
                     help="rerun with these synthetic news ICs (same market data) and plot alpha against news quality")
     args = ap.parse_args()
-    cfg = load_config(args.config)
+    overrides = {"data": {k: v for k, v in [("source", args.data), ("news_file", args.news and str(args.news)),
+                                            ("scores_file", args.scores and str(args.scores))] if v}, "llm": {}}
+    if args.batch:
+        overrides["llm"]["batch"] = True
+    if args.llm and args.llm != "mock":
+        overrides["llm"]["provider"], args.live = args.llm, True
+    cfg = merge(load_config(args.config), overrides)
     if not args.ic_sweep:
         run(cfg, args.out, args.live, args.show)
         return
     rows = []
     for ic in args.ic_sweep:
         print(f"--- sentiment_ic = {ic}")
-        rows.append(run(merge(load_config(args.config), {"synthetic": {"sentiment_ic": ic}}), args.out / f"ic_{ic:g}",
+        rows.append(run(merge(merge(load_config(args.config), overrides), {"synthetic": {"sentiment_ic": ic}}), args.out / f"ic_{ic:g}",
                         verbose=False))
         print({k: round(v, 4) if isinstance(v, float) else v for k, v in rows[-1].items()})
     sweep = pd.DataFrame(rows).set_index("sentiment_ic")

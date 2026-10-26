@@ -13,7 +13,7 @@ def tables(cfg, X, y, S, s, betas, bench, overlay, sched, b0):
     yy = pd.DataFrame(y).loc[S.index]
     ic = pd.DataFrame({"IC(S, y)": [S[a].corr(yy[a]) for a in assets], "IC(s, y)": [s[a].corr(yy[a]) for a in assets]}, assets)
     ic.loc["pooled"] = [S.stack().corr(yy.stack()), s.stack().corr(yy.stack())]
-    llm_ic = pd.Series({k: pd.concat([X[a].get(f"llm_{k}@{cfg['assets'][a][0]}", pd.Series(dtype=float)).loc[S.index]
+    llm_ic = pd.Series({k: pd.concat([X[a].get(f"llm_{k}@{cfg['assets'][a][0]}", pd.Series(dtype=float)).reindex(S.index)
                                       for a in assets]).corr(pd.concat([yy[a] for a in assets]))
                         for k in cfg["llm_feature_signs"]}, name="pooled IC (own L3 node)")
     last = sched.index[-1]

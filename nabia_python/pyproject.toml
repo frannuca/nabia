@@ -30,6 +30,12 @@ test = ["pytest>=7", "sqlalchemy>=2.0"]
 [project.scripts]
 nabia-sentiment = "nabia.sentiment_rb.__main__:main"
 
+[tool.uv]
+# nabia_python_bridge is not on PyPI: uv takes it from the wheels built by cpp/scripts/build_wheels.sh (or
+# downloaded by scripts/fetch_wheels.sh) in ../dist. After a rebuild with the same version number:
+#   uv sync --reinstall-package nabia-python-bridge --refresh-package nabia-python-bridge
+find-links = ["../dist"]
+
 [tool.setuptools.packages.find]
 include = ["nabia*"]
 

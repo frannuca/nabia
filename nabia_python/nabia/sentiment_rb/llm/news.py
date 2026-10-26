@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import re
+import time
 import zlib
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pandas as pd
@@ -20,41 +22,113 @@ def embed(text, dim=256):
     return v / (np.linalg.norm(v) or 1)
 
 
-def run_news(cfg, news, f, llm, live_from):
-    """Dedup -> triage -> scoring -> per-node weighted scores by day; daily digest. Returns (scores, digests)."""
+def run_all(work, items, llm, label, checkpoint=None):
+    """work(item) for every item, in order: in parallel threads for live calls (llm.workers), sequentially for the
+    offline mock (whose random draws must keep their order). Reports progress on long live runs, and calls
+    checkpoint() every 25 items (to save intermediate results)."""
+    workers = llm.cfg["llm"]["workers"] if llm.provider != "mock" else 1
+    if workers <= 1 and llm.provider == "mock":
+        return [work(item) for item in items]
+    start, results = time.perf_counter(), []
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        for n, result in enumerate(pool.map(work, items), 1):
+            results.append(result)
+            if n % 25 == 0 or n == len(items):
+                if checkpoint:
+                    checkpoint()
+                rate = n / (time.perf_counter() - start)
+                print(f"  {label}: {n}/{len(items)}, {rate:.2f}/s, {(len(items) - n) / rate / 60:.0f} min left", flush=True)
+    return results
+
+
+def run_news(cfg, news, dates, llm, live_from, truth=None, details=None, digests_out=None, checkpoint=None):
+    """Dedup -> triage -> scoring -> per-node weighted scores by day; daily digest. Returns (scores, digests).
+
+    Articles are assigned to the first date at or after the day they were received. Days from live_from on go to the
+    live model (through the response cache); with llm.batch, their uncached requests are first submitted as Message
+    Batches (triage, then scoring, then digests). `truth` (synthetic runs) feeds the offline mock of the digest.
+    `details` and `digests_out`, dicts, receive each article's triage and scores and each day's digest as they are
+    computed; `checkpoint()` is called every 25 articles or digests (the scoring command saves its file there).
+    """
     tax, L = cfg["taxonomy"], cfg["llm"]
+    if news.empty:
+        return pd.DataFrame(columns=["day", "node", "sentiment", "weight"]), {}
     alias = {v[1]: f"Entity {i}" for i, v in enumerate(tax.values())} if L["anonymize"] else {}
     anon = lambda s: re.sub("|".join(map(re.escape, alias)), lambda m: alias[m[0]], s) if alias else s
     taxonomy_lines = "\n".join(f"{n} | {anon(v[1])} | {v[2]} | {anon(v[1])}" for n, v in tax.items())
     news = news.sort_values("received_ts").reset_index(drop=True)
-    news["day"] = f.index[np.minimum(f.index.searchsorted(news.received_ts.dt.normalize()), len(f) - 1)]
-    vecs, cluster, records, recent = [embed(h) for h in news.headline], {}, [], []
-    for i, a in news.iterrows():
+    news["day"] = dates[np.minimum(dates.searchsorted(news.received_ts.dt.normalize()), len(dates) - 1)]
+    base = {i: {"publish_ts_utc": a.publish_ts, "source_name": a.source, "headline": anon(a.headline),
+                "body": anon(a.body), "body_truncated_to_N_tokens": anon(a.body)[:4000]} for i, a in news.iterrows()}
+    triage_fill = lambda i: (lambda t: fill(t, base[i], taxonomy_lines))
+    node_lines = lambda nodes: "\n".join(f"{m.node_id} | {anon(tax[m.node_id][1])} | {tax[m.node_id][2]} | {m.channel}" for m in nodes)
+    scoring_fill = lambda i, nodes: (lambda t: fill(t, base[i], node_lines(nodes)))
+    entity = {f"entity {k}": n for k, n in enumerate(tax)}
+
+    def canonical(node_id):
+        """The taxonomy node an answer means: models sometimes return the anonymized name ("Entity 3") or copy the
+        whole prompt line ("L1.EQ | Entity 1 | EQ | direct")."""
+        head = node_id.split("|")[0].strip()
+        return head if head in tax else entity.get(head.lower(), node_id)
+
+    def relevant_nodes(tri):
+        if not (tri and tri.relevant):
+            return []
+        nodes = {}
+        for m in tri.nodes:
+            if (node := canonical(m.node_id)) in tax and node not in nodes:
+                nodes[node] = m.model_copy(update={"node_id": node})
+        return list(nodes.values())
+    if llm.client is not None and L["batch"]:  # backfill the live days' triage and scoring as batches
+        live_rows = [i for i in news.index if news.day[i] >= live_from]
+        llm.prefill("triage", [triage_fill(i) for i in live_rows])
+        cached = {i: llm.cache.get(llm.request("triage", triage_fill(i))[1]) for i in live_rows}
+        found = {i: relevant_nodes(llm.SCHEMAS["triage"].model_validate(raw)) for i, raw in cached.items() if raw}
+        llm.prefill("scoring", [scoring_fill(i, nodes) for i, nodes in found.items() if nodes])
+    vecs, cluster, novelty, recent = [embed(h) for h in news.headline], {}, {}, []
+    for i, a in news.iterrows():  # dedup clusters and novelty, in order of receipt
         recent = [j for j in recent if a.received_ts - news.received_ts[j] < pd.Timedelta(hours=L["dedup_hours"])]
         same = [j for j in recent if vecs[i] @ vecs[j] > L["dedup_cosine"]]
         cluster[i] = cluster[same[0]] if same else i
-        novelty = 1 / (1 + sum(cluster[j] == cluster[i] for j in recent))
+        novelty[i] = 1 / (1 + sum(cluster[j] == cluster[i] for j in recent))
         recent.append(i)
-        live, base = a.day >= live_from, {"publish_ts_utc": a.publish_ts, "source_name": a.source,
-                                          "headline": anon(a.headline), "body": anon(a.body),
-                                          "body_truncated_to_N_tokens": anon(a.body)[:4000]}
-        tri = llm("triage", lambda t: fill(t, base, taxonomy_lines), {"article": a, "cfg": cfg, "ref": int(a.id)}, live)
-        if not tri or not tri.relevant or not (nodes := [m for m in tri.nodes if m.node_id in tax]):
-            continue
-        node_lines = "\n".join(f"{m.node_id} | {anon(tax[m.node_id][1])} | {tax[m.node_id][2]} | {m.channel}" for m in nodes)
-        sc = llm("scoring", lambda t: fill(t, base, node_lines), {"article": a, "nodes": nodes, "ref": int(a.id)}, live)
+
+    def article(i):
+        """Triage and scoring of one article: its (day, node, sentiment, weight) records."""
+        a = news.loc[i]
+        live = a.day >= live_from
+        tri = llm("triage", triage_fill(i), {"article": a, "ref": int(a.id)}, live)
+        nodes = relevant_nodes(tri)
+        sc = llm("scoring", scoring_fill(i, nodes), {"article": a, "nodes": nodes, "ref": int(a.id)}, live) if nodes else None
         rel = {m.node_id: m.relevance for m in nodes}
-        for s in sc.scores if sc else []:
-            if s.node_id in rel:
-                w = rel[s.node_id] * s.confidence * novelty * L["source_weight"].get(a.source, 0.5)
-                records.append((a.day, s.node_id, s.sentiment, w))
-    digests = {}
-    for day, g in news.groupby("day"):
-        items = "\n".join(f"{r.publish_ts} | {r.source} | {anon(r.headline)} | {anon(r.body)}" for r in g.itertuples())
-        d = llm("digest", lambda t: fill(t, {"yyyy-mm-dd": day.date()}, items),
-                {"factors": f.loc[day], "n": len(g), "ref": str(day.date())}, day >= live_from)
-        if d:
-            digests[day] = d
+        scores = [s.model_copy(update={"node_id": canonical(s.node_id)}) for s in (sc.scores if sc else [])]
+        scores = list({s.node_id: s for s in scores if s.node_id in rel}.values())
+        if details is not None:
+            details[i] = {"id": int(a.id), "received_ts": str(a.received_ts), "source": a.source, "headline": a.headline,
+                          "relevant": bool(nodes), "event_type": tri.event_type if tri else None,
+                          "scores": [{**s.model_dump(), "relevance": rel[s.node_id], "novelty": novelty[i],
+                                      "channel": next(m.channel for m in nodes if m.node_id == s.node_id),
+                                      "weight": rel[s.node_id] * s.confidence * novelty[i] * L["source_weight"].get(a.source, 0.5)}
+                                     for s in scores]}
+        return [(a.day, s.node_id, s.sentiment, rel[s.node_id] * s.confidence * novelty[i] * L["source_weight"].get(a.source, 0.5))
+                for s in scores]
+
+    records = [r for rs in run_all(article, list(news.index), llm, "articles", checkpoint) for r in rs]
+    days = list(news.groupby("day"))
+    digest_fill = lambda day, g: (lambda t: fill(t, {"yyyy-mm-dd": day.date()}, "\n".join(
+        f"{r.publish_ts} | {r.source} | {anon(r.headline)} | {anon(r.body)}" for r in g.itertuples())))
+    llm.prefill("digest", [digest_fill(day, g) for day, g in days if day >= live_from])
+
+    def digest(item):
+        day, g = item
+        ctx = {"factors": None if truth is None else truth.loc[day], "headlines": list(g.headline), "n": len(g),
+               "ref": str(day.date())}
+        d = llm("digest", digest_fill(day, g), ctx, day >= live_from)
+        if digests_out is not None and d:
+            digests_out[day] = d
+        return day, d
+
+    digests = {day: d for day, d in run_all(digest, days, llm, "digests", checkpoint) if d}
     return pd.DataFrame(records, columns=["day", "node", "sentiment", "weight"]), digests
 
 

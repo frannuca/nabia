@@ -39,7 +39,8 @@ def asset_matrix(cfg, feats, asset):
     """Candidate features of an asset: those of every ancestor node, oriented (+ = bullish), each exactly once."""
     node, cls = cfg["assets"][asset][:2]
     path = set(ancestors(cfg, node))
-    cols = {fid: sign_for(sign, cls) * z for fid, (z, n, sign) in feats.items() if n in path and sign_for(sign, cls)}
+    cols = {fid: sign_for(sign, cls) * z for fid, (z, n, sign) in feats.items()
+            if n in path and sign_for(sign, cls) and z.notna().any()}  # features with no data at all are left out
     return pd.DataFrame(cols)
 
 

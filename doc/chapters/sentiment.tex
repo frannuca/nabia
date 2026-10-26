@@ -45,9 +45,9 @@ runs on a small simulator that repeats the engine's accounting with a direction 
 Folder & Files & Area \\
 \midrule
 --- & \code{config.py}, \code{pipeline.py}, \code{\_\_main\_\_.py} & settings, \code{run()}, command line and sweep \\
-\code{data/} & \code{synthetic.py} & synthetic market data, indicators and news \\
+\code{data/} & \code{synthetic.py}, \code{real.py}, \code{example\_news.py} & synthetic data; real prices, indicators and news files; example news \\
 \code{features/} & \code{tree.py}, \code{transforms.py} & indicator tree; point-in-time transforms, candidate features, target \\
-\code{llm/} & \code{schemas.py}, \code{client.py}, \code{news.py} & output schemas; mock or Anthropic client; dedup, scoring, node features \\
+\code{llm/} & \code{schemas.py}, \code{client.py}, \code{news.py}, \code{lexicon.py}, \code{batch.py} & schemas; mock or cached Anthropic client; dedup, scoring, node features; offline reader; Message Batches \\
 \code{model/} & \code{elastic\_net.py} & elastic net per asset, walk-forward $S$ and $s$ \\
 \code{portfolio/} & \code{budgets.py}, \code{backtest.py} & budgets and directions; backtests, simulator, checks \\
 \code{report/} & \code{tables.py}, \code{figures.py} & report tables and CSV; figures \\
@@ -362,6 +362,94 @@ $6\times10^{-9}$, identical Sharpe ratio. The long-only path asserts this on eve
 independent data (\coderef{rb_test_simulator}); \coderef{rb_test_short} checks Proposition~\ref{prop:rb-short}.
 \snippet{rb_simulate}{Python}{The engine's accounting with directions}
 \snippet{rb_backtests}{Python}{Benchmark and overlay: same covariance, rebalancing and costs}
+
+%==============================================================================
+\chapter{Real data and live scoring}\label{ch:rb-real}
+
+With \code{--data real} (\code{"data": \{"source": "real"\}}), \code{run} replaces the synthetic generators by three
+loaders and leaves everything downstream unchanged.
+
+\section{Prices and indicators}
+\code{real\_market} downloads daily closes from Yahoo Finance and series from FRED and caches each as a CSV file in
+\code{data.cache\_dir}, so a run is reproducible and works offline once the cache exists. The mapping is in
+\code{CONFIG["real"]}: an asset ticker per asset (the energy asset uses Brent, since WTI settled negative on 2020-04-20)
+and, per indicator, its source:
+\begin{center}\small
+\begin{tabular}{@{}l l l@{}}
+\toprule
+Feature & Source & Series \\
+\midrule
+\code{VIX}, \code{MOVE}, \code{USD} & Yahoo Finance & \code{\^{}VIX}, \code{\^{}MOVE}, \code{DX-Y.NYB} \\
+\code{HY\_OAS}, \code{NFCI}, \code{TERM\_PREMIUM} & FRED & \code{BAMLH0A0HYM2}, \code{NFCI}, \code{THREEFYTP10} \\
+\code{CRACK} & derived & $(2\,\text{gasoline}+\text{heating oil})\times42/3-\text{crude}$, in \$/barrel \\
+\bottomrule
+\end{tabular}
+\end{center}
+Features without a free source are removed from the run. Returns use the US trading calendar, other markets'
+holidays forward-filled (at most three days); each indicator is taken as of its last observation on or before each
+date, and the publication lags of \code{CONFIG["features"]} then apply as usual. FRED publishes only about three years
+of the high-yield OAS; before that the feature is missing and counts as neutral.
+\snippet{rb_real_market}{Python}{Real returns and indicator levels}
+
+\section{News files and the offline reader}
+\code{load\_news} reads a JSON file of articles with \code{publish\_ts}, \code{received\_ts} (ISO 8601), \code{source},
+\code{headline} and \code{body}: the fields a news feed provides. Until one exists, \code{data/example\_news.json} stands
+in: \code{example\_news.py} applies the oracle construction of \S\ref{sec:rb-oracle} to the \emph{real} assets' forward
+returns (IC 0.2 by default) and writes articles in the real format, so a real-data run has news with a known skill. It
+looks ahead on purpose and must be replaced by real news for any conclusion.
+
+Offline, articles without a synthetic truth are read by \code{lexicon\_response}: the node is the taxonomy node whose
+name or alias (\code{CONFIG["aliases"]}) is the longest found in the headline, its parent a spillover; the tone is
+$\tanh$ of the summed polarities of finance words; recaps are recognized by their wording; the digest averages the day's
+tones per node. On the example vocabulary this recovers the five tone levels in order.
+\snippet{rb_lexicon_response}{Python}{The offline reading of real-format articles}
+
+\section{Live scoring, the response cache and Message Batches}
+With \code{--live}, the days from \code{llm.live\_days} before the end are scored by the model; \code{0} scores every
+day. Each call has a key, the hash of the prompt version, the model and the filled request; a valid response is
+appended to \code{llm.cache} (\code{data/llm\_cache.jsonl}) and every later call with the same key, in this run or the
+next, is served from it, so each article is paid for once and a run can be repeated exactly. With \code{--batch}, the
+uncached requests of a run are first submitted as Message Batches, one per stage, because scoring depends on triage and
+the digests on the day's articles: all triage requests, then the scoring requests of the relevant articles, then the
+digests. Each batch is polled until it ends, its valid responses are cached, and the pipeline's calls that follow are
+cache hits; failed entries are retried one by one by the normal path.
+\snippet{rb_batch_submit}{Python}{Message Batches: submit, wait, cache}
+\begin{codepointers}
+  \codeitem{rb_load_news}{news files}
+  \codeitem{rb_make_example_news}{example news from real returns}
+  \codeitem{rb_llm_request}{cache key of a call}
+  \codeitem{rb_llm_prefill}{batch backfill of one stage}
+\end{codepointers}
+
+\section{Downloading news: nabia.news}\label{sec:rb-news-download}
+The package \code{nabia.news} collects real articles into the JSON format above (\code{python -m nabia.news fetch}):
+\begin{description}
+  \item[RSS / Atom feeds] (\coderef{rb_news_feeds}): financial media and central banks, parsed with the standard library
+        (RFC 822 or ISO 8601 dates, HTML stripped). Feeds carry only recent items, so \code{received\_ts} is the download
+        time and history is built by running the download daily.
+  \item[GDELT raw files] (\coderef{rb_news_gkg}): GDELT publishes every 15 minutes a file of the English web articles it
+        processed, with their page titles. For history, two slices per business day (14:30 and 20:30 UTC) are read in
+        memory; titles about the portfolio's topics are kept, established financial outlets first, at most
+        \code{--per-day} per day; \code{received\_ts} is the slice's timestamp, when GDELT had the article, so the
+        history stays point in time. GDELT's search API (\code{--gdelt}) is also supported but rate-limits hard.
+  \item[The store] (\coderef{rb_news_store}): \code{data/news.json}, deduplicated by URL and by normalized headline on the
+        same day, appended in place and written atomically; each record keeps its feed and URL.
+\end{description}
+
+\section{Scoring with a local model and scores files}
+Besides the Anthropic API, the LLM steps can run on a local model served by Ollama (\code{"provider": "ollama"};
+\coderef{rb_llm_ollama}): the same prompts, the output constrained to the pydantic schema through Ollama's structured
+output, temperature 0, and the same response cache. On the development machine (Apple silicon, 34 GB),
+\code{gemma4:26b}, a mixture-of-experts model, was the fastest model with sensible answers: about 85 generated tokens
+per second and about 2 s per call, against 12--22 s for a dense 27B model. Serving several requests at once
+(\code{OLLAMA\_NUM\_PARALLEL} $>1$) slowed every request several times on that machine (prompts re-read, generation
+at a few tokens per second per slot), so a local model is used with one worker.
+
+\code{python -m nabia.news score} runs triage, scoring and the daily digests over a news store and writes a
+\emph{scores file} (\coderef{rb_write_scores}): per article its triage and node scores (sentiment, confidence,
+relevance, novelty and the resulting weight), per day its digest, with the provider, model and prompt versions. With
+\code{--scores} (\code{data.scores\_file}), the pipeline reads it (\coderef{rb_load_scores}), maps every article and
+digest to the first trading date at or after its day, and calls no model.
 
 %==============================================================================
 \chapter{Synthetic data, experiments and results}\label{ch:rb-synthetic}

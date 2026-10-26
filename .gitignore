@@ -23,3 +23,7 @@ nabia_python/wheels.tmp/
 # Local market data databases
 *.db
 *.sqlite
+# real-data downloads (data.cache_dir) and the live LLM response cache (llm.cache)
+nabia_python/data/cache/
+nabia_python/data/llm_cache.jsonl
+nabia_python/uv.lock

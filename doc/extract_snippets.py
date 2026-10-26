@@ -88,7 +88,7 @@ SNIPPETS: list[tuple[str, str, tuple]] = [
     ('rb_llm_call', 'nabia_python/nabia/sentiment_rb/llm/client.py', ('py', 'LLM.__call__')),
     ('rb_llm_anthropic', 'nabia_python/nabia/sentiment_rb/llm/client.py', ('py', 'LLM._anthropic')),
     ('rb_dedup', 'nabia_python/nabia/sentiment_rb/llm/news.py', ('between', 'recent = [j for j in recent', 'recent.append(i)')),
-    ('rb_weights', 'nabia_python/nabia/sentiment_rb/llm/news.py', ('between', 'rel = {m.node_id: m.relevance', 'records.append((a.day')),
+    ('rb_weights', 'nabia_python/nabia/sentiment_rb/llm/news.py', ('between', 'return [(a.day, s.node_id, s.sentiment', 'for s in scores]')),
     ('rb_ema0', 'nabia_python/nabia/sentiment_rb/llm/news.py', ('py', 'ema0')),
     ('rb_node_features', 'nabia_python/nabia/sentiment_rb/llm/news.py', ('py', 'node_features')),
     ('rb_fit_asset', 'nabia_python/nabia/sentiment_rb/model/elastic_net.py', ('py', 'fit_asset')),
@@ -102,6 +102,9 @@ SNIPPETS: list[tuple[str, str, tuple]] = [
     ('rb_simulate', 'nabia_python/nabia/sentiment_rb/portfolio/backtest.py', ('py', 'simulate')),
     ('rb_backtests', 'nabia_python/nabia/sentiment_rb/portfolio/backtest.py', ('py', 'backtests')),
     ('rb_run', 'nabia_python/nabia/sentiment_rb/pipeline.py', ('py', 'run')),
+    ('rb_real_market', 'nabia_python/nabia/sentiment_rb/data/real.py', ('py', 'real_market')),
+    ('rb_lexicon_response', 'nabia_python/nabia/sentiment_rb/llm/client.py', ('py', 'lexicon_response')),
+    ('rb_batch_submit', 'nabia_python/nabia/sentiment_rb/llm/batch.py', ('py', 'submit')),
 ]
 
 #: Location-only references (\\coderef{name}): where a concept lives, without an excerpt.
@@ -205,6 +208,16 @@ REFS: list[tuple[str, str, tuple]] = [
     ('rb_plots', 'nabia_python/nabia/sentiment_rb/report/figures.py', ('py', 'plots')),
     ('rb_plot_sweep', 'nabia_python/nabia/sentiment_rb/report/figures.py', ('py', 'plot_sweep')),
     ('rb_main', 'nabia_python/nabia/sentiment_rb/__main__.py', ('py', 'main')),
+    ('rb_load_news', 'nabia_python/nabia/sentiment_rb/data/real.py', ('py', 'load_news')),
+    ('rb_make_example_news', 'nabia_python/nabia/sentiment_rb/data/example_news.py', ('py', 'make_example_news')),
+    ('rb_llm_request', 'nabia_python/nabia/sentiment_rb/llm/client.py', ('py', 'LLM.request')),
+    ('rb_llm_prefill', 'nabia_python/nabia/sentiment_rb/llm/client.py', ('py', 'LLM.prefill')),
+    ('rb_news_feeds', 'nabia_python/nabia/news/sources.py', ('py', 'fetch_rss')),
+    ('rb_news_gkg', 'nabia_python/nabia/news/sources.py', ('py', 'fetch_gkg')),
+    ('rb_news_store', 'nabia_python/nabia/news/store.py', ('py', 'NewsStore')),
+    ('rb_llm_ollama', 'nabia_python/nabia/sentiment_rb/llm/client.py', ('py', 'LLM._ollama')),
+    ('rb_write_scores', 'nabia_python/nabia/sentiment_rb/data/scores.py', ('py', 'write_scores')),
+    ('rb_load_scores', 'nabia_python/nabia/sentiment_rb/data/scores.py', ('py', 'load_scores')),
     ('rb_test_short', 'nabia_python/tests/test_sentiment_rb.py', ('py', 'test_short_positions_keep_their_risk_budget')),
     ('rb_test_simulator', 'nabia_python/tests/test_sentiment_rb.py', ('py', 'test_simulator_reproduces_the_nabia_engine_when_all_long')),
 ]

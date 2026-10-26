@@ -113,6 +113,21 @@ From \code{nabia\_python/} (Part~\ref{part:sentiment} describes the method):
         \end{itemize}
 \end{itemize}
 
+\section{Real data}\label{sec:guide-real}
+\begin{lstlisting}[language=bash]
+.venv/bin/python -m nabia.sentiment_rb --data real --out output/real          # real prices, example news, offline
+.venv/bin/python -m nabia.sentiment_rb --data real --news my_news.json         # your own news file
+.venv/bin/python -m nabia.sentiment_rb.data.example_news --ic 0.3             # regenerate the example news
+.venv/bin/python -m nabia.sentiment_rb --data real --live --batch --config <(echo '{"llm": {"live_days": 0}}')
+.venv/bin/python -m nabia.news fetch --no-rss --gkg --since 2024-01-01    # news history -> data/news.json
+.venv/bin/python -m nabia.news fetch                                       # today's RSS items (run daily)
+.venv/bin/python -m nabia.news score                                     # local Ollama -> data/news_scores.json
+.venv/bin/python -m nabia.sentiment_rb --data real --scores data/news_scores.json
+\end{lstlisting}
+Prices and indicators come from Yahoo Finance and FRED and are cached in \code{data/cache}; news comes from a JSON
+file of articles; live scoring caches every response in \code{data/llm\_cache.jsonl}. Chapter~\ref{ch:rb-real}
+describes the three parts.
+
 \section{Debugging the C++ code from Python}\label{sec:guide-debug}
 \begin{enumerate}
   \item Build a wheel with debug symbols (\code{NABIA\_WHEEL\_BUILD\_TYPE=RelWithDebInfo}) and run
