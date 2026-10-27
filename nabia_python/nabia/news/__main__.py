@@ -9,8 +9,10 @@ import sys
 from pathlib import Path
 
 from . import __doc__ as overview
-from .sources import FEEDS, GDELT_QUERIES, fetch_gdelt, fetch_gkg, fetch_rss, now_utc
+from .collect import collect_gkg, collect_rss
+from .sources import FEEDS, GDELT_QUERIES, fetch_gdelt
 from .store import NewsStore
+
 
 
 def main(argv=None):
@@ -45,24 +47,13 @@ def main(argv=None):
         from .scoring import score_news
         llm = {"provider": args.provider, **({"ollama_model": args.model} if args.model else {}),
                **({"workers": args.workers} if args.workers else {})}
-        score_news(merge(load_config(args.config), {"llm": llm}), args.file, args.out)
+        score_news(merge(load_config(args.config, "real"), {"llm": llm}), args.file, args.out)
         return 0
     store = NewsStore(args.file)
     if args.command == "stats":
         print(json.dumps(store.stats(), indent=2))
         return 0
-    added, failed = 0, []
-    if not args.no_rss:
-        received = now_utc()
-        for name in args.feeds or FEEDS:
-            url, weight = FEEDS[name]
-            try:
-                n = store.add(fetch_rss(name, url, weight, received))
-                print(f"{name:18} +{n}")
-                added += n
-            except Exception as error:  # a feed down must not stop the others
-                failed.append(name)
-                print(f"{name:18} failed: {type(error).__name__}: {str(error)[:80]}", file=sys.stderr)
+    added, failed = collect_rss(store, args.feeds) if not args.no_rss else (0, [])
     if args.gdelt:
         today = dt.datetime.now(dt.timezone.utc).date()
         start = dt.datetime.combine(args.since or today - dt.timedelta(days=1), dt.time(), dt.timezone.utc)
@@ -79,28 +70,8 @@ def main(argv=None):
     if args.gkg:
         if not args.since:
             ap.error("--gkg needs --since")
-        from concurrent.futures import ThreadPoolExecutor
-        until = args.until or dt.datetime.now(dt.timezone.utc).date()
-        days = [args.since + dt.timedelta(days=k) for k in range((until - args.since).days)]
-        days = [d for d in days if args.weekends or d.weekday() < 5]
-
-        def one(day):
-            try:
-                return day, fetch_gkg(day, per_day=args.per_day), None
-            except Exception as error:
-                return day, [], error
-
-        with ThreadPoolExecutor(max_workers=args.workers) as pool:  # a few files at a time from GDELT's file server
-            for k, (day, articles, error) in enumerate(pool.map(one, days), 1):
-                if error:
-                    failed.append(str(day))
-                    print(f"GKG {day} failed: {type(error).__name__}: {str(error)[:80]}", file=sys.stderr, flush=True)
-                    continue
-                n = store.add(articles)
-                added += n
-                print(f"GKG {day} +{n} ({len(store.articles)} stored)", flush=True)
-                if k % 20 == 0:
-                    store.save()  # keep what was collected so far
+        n, bad = collect_gkg(store, args.since, args.until, args.per_day, args.weekends, args.workers)
+        added, failed = added + n, failed + bad
     store.save()
     print(f"{added} new articles, {len(store.articles)} in {args.file}" + (f"; failed: {failed}" if failed else ""))
     return 1 if failed and not added else 0

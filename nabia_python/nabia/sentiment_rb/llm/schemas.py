@@ -22,15 +22,10 @@ class Triage(BaseModel):
     nodes: list[NodeMap]
 
 
-class Score(BaseModel):
+class Score(BaseModel):  # only what the features use: a short output keeps a local model fast
     node_id: str
     sentiment: float = Field(ge=-1, le=1)
     confidence: float = Field(ge=0, le=1)
-    magnitude: Literal["low", "medium", "high"]
-    horizon: Literal["intraday", "days", "weeks", "structural"]
-    surprise_vs_expectations: Literal["below", "inline", "above", "not_stated"]
-    fact_type: Literal["confirmed", "official_statement", "rumour", "opinion"]
-    rationale: str
 
 
 class Scores(BaseModel):

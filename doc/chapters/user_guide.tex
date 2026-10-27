@@ -128,6 +128,56 @@ Prices and indicators come from Yahoo Finance and FRED and are cached in \code{d
 file of articles; live scoring caches every response in \code{data/llm\_cache.jsonl}. Chapter~\ref{ch:rb-real}
 describes the three parts.
 
+\section{Run configurations and the weights script}\label{sec:guide-weights}
+The settings are in three parts (\coderef{rb_config}). \code{CONFIG} holds the methodology every run shares:
+the factor tree, assets, features, windows, model, budgets, portfolio and LLM. \code{SYNTHETIC} and \code{REAL}
+hold the data settings of each kind of run. A run's JSON file chooses one with \code{data.source} and overrides any
+key: \code{configs/synthetic.json} (generated market and news, the oracle skill) and \code{configs/real.json}
+(Yahoo and FRED prices, the news and scores files, the LLM provider).
+\begin{lstlisting}[language=bash]
+.venv/bin/python -m nabia.sentiment_rb --config configs/synthetic.json --out output/syn   # full report and figures
+.venv/bin/python -m nabia.sentiment_rb --config configs/real.json --out output/real
+.venv/bin/python scripts/sentiment_weights.py configs/real.json                           # weights only
+\end{lstlisting}
+\code{scripts/sentiment\_weights.py} takes a single argument, the configuration, and computes the signal, the budgets,
+the directions and the weights over a lookback window (\code{backtest.lookback\_days}, ending at
+\code{backtest.as\_of}, by default the last date). With \code{data.scores\_file} it reads the LLM scores. Without one,
+it scores \code{data.news\_file} with \code{llm.provider}: \code{mock} (offline) or \code{ollama} or
+\code{anthropic} (live). An \code{as\_of} date also cuts the data there, so the position uses nothing that came later.
+It writes the following to \code{backtest.out}:
+\begin{itemize}
+  \item \code{signal.csv}: the daily $s$;
+  \item \code{rebalances.csv}: per rebalance and asset, $s$, the direction, the budget, the weight and the risk
+        contribution;
+  \item \code{current.csv}: the position to hold from the as-of date;
+  \item \code{summary.json}: that position and the window's performance against plain ERC.
+\end{itemize}
+
+\section{The staged real-data pipeline}\label{sec:guide-stages}
+Five scripts run the real-data pipeline one step at a time, each from the configuration file alone. Each step
+writes a file that the later steps read, so it runs once (\coderef{rb_stages}):
+\begin{lstlisting}[language=bash]
+.venv/bin/python scripts/pipeline/collect_news_1.py configs/real.json      # articles -> data.news_file
+.venv/bin/python scripts/pipeline/digest_news_2.py configs/real.json       # LLM daily digests -> data.digests_file
+.venv/bin/python scripts/pipeline/score_news_3.py configs/real.json        # LLM article scores -> data.scores_file
+.venv/bin/python scripts/pipeline/calibrate_betas_4.py configs/real.json   # elastic-net betas -> data.betas_file
+.venv/bin/python scripts/pipeline/backtest_5.py configs/real.json          # portfolio with the stored betas
+\end{lstlisting}
+\begin{enumerate}
+  \item \textbf{Collect} (section \code{collect}): RSS items and GDELT GKG history, deduplicated, appended to the
+        news file. Run it again to add new articles.
+  \item \textbf{Digest}: the LLM's macro digest of every day (Prompt C), with \code{llm.provider}.
+  \item \textbf{Score}: triage and node scores of every article (Prompts A and B). Steps 2 and 3 save their file every
+        25 items and cache every response in \code{llm.cache}, so an interrupted run resumes.
+  \item \textbf{Calibrate}: the purged walk-forward elastic net of every asset (Chapter~\ref{ch:rb-model}). The betas
+        of every refit date are stored with the asset's candidate features and the model settings
+        (\coderef{rb_fit_betas}).
+  \item \textbf{Backtest}: each refit's stored betas give $S$ and $s$ from the next day to the next refit
+        (\coderef{rb_apply_betas}). The budgets, directions, backtest against ERC, report and positions follow. Betas
+        whose features are no longer the run's candidates are refused.
+\end{enumerate}
+Splitting the calibration from the scoring gives exactly the results of the one-shot run, as a test checks.
+
 \section{Debugging the C++ code from Python}\label{sec:guide-debug}
 \begin{enumerate}
   \item Build a wheel with debug symbols (\code{NABIA\_WHEEL\_BUILD\_TYPE=RelWithDebInfo}) and run

@@ -51,7 +51,7 @@ Folder & Files & Area \\
 \code{model/} & \code{elastic\_net.py} & elastic net per asset, walk-forward $S$ and $s$ \\
 \code{portfolio/} & \code{budgets.py}, \code{backtest.py} & budgets and directions; backtests, simulator, checks \\
 \code{report/} & \code{tables.py}, \code{figures.py} & report tables and CSV; figures \\
-\code{prompts/} & \code{triage\_v1.md}, \dots & versioned prompt files (system and user templates) \\
+\code{prompts/} & \code{triage.md}, \code{scoring.md}, \code{digest.md} & prompt files (system and user templates) \\
 \bottomrule
 \end{tabularx}
 \end{center}
@@ -62,22 +62,63 @@ and the normalization method change without code edits.
 %==============================================================================
 \chapter{Indicator tree, point-in-time features and target}\label{ch:rb-features}
 
-\section{The indicator tree}
-The taxonomy is a tree of nodes: \code{L0.GLOBAL} (global risk appetite) at the root; the asset classes
-\code{L1.EQ}, \code{L1.CMD}, \code{L1.FI}; buckets \code{L2.*} (US and European equities, energy, precious
-metals, 10-year Treasuries, high yield); and one node per underlying \code{L3.*}. Each node has a parent; the
-ancestors of $n$ are $\anc(n)=\{n,\text{parent}(n),\dots,\code{L0.GLOBAL}\}$ (\coderef{rb_ancestors}). Asset $i$
-sits at an L3 node $n_i$ and belongs to an asset class $c(i)\in\{\mathrm{EQ},\mathrm{CMD},\mathrm{GOVT},\mathrm{CREDIT}\}$.
+\section{The sentiment factor tree}
+The taxonomy is a tree of sentiment factors (\code{TREE} in \coderef{rb_config}, 85 nodes), from the generic to
+the specific. A \emph{global} factor \code{GLOBAL} (global risk appetite) is the root. Below it are three
+\emph{regions}, \code{US}, \code{EU} (Europe) and \code{APAC} (Asia-Pacific), and the commodity complex
+\code{CMD}, a market without a region. Every region has the same six branches:
+\begin{center}\small
+\begin{tabular}{@{}l l l p{0.52\linewidth}@{}}
+\toprule
+Branch & Kind & Asset class & Children (US / EU / APAC) \\
+\midrule
+\code{.MACRO} & macro & mixed & growth, labor, inflation / growth, inflation, UK / China, Japan, India \\
+\code{.CB} & policy & mixed & Fed / ECB, BoE, SNB / BoJ, PBoC, RBA \\
+\code{.EQ} & sector & EQ & S\&P 500, tech, banks, energy, healthcare, consumer, industrials / Euro Stoxx 50, banks, \dots \\
+\code{.RATES} & sector & GOVT & 10y Treasury, short-dated / Bunds, periphery, gilts / JGBs, Chinese bonds \\
+\code{.CREDIT} & sector & CREDIT & investment grade, high yield / -- / -- \\
+\code{.FX} & currency & FX & USD / EUR, GBP, CHF / JPY, CNY, AUD \\
+\bottomrule
+\end{tabular}
+\end{center}
+\code{CMD} has energy (crude oil, natural gas, refined products), precious metals (gold, silver), industrial
+metals (copper, aluminium, iron ore) and agriculture (grains, softs). A node's ID is its path, e.g.
+\code{US.EQ.TECH} or \code{APAC.FX.JPY}, and the depth is free. Each node carries a parent, a display name, the
+asset class of its subtree (\emph{mixed} for the global, region, macro and policy nodes) and its kind (global,
+region, market, macro, policy, sector or currency). The tree describes sentiment only: the portfolio's assets are
+not part of it. The detail nodes route news precisely and pass it up to the nodes above them (roll-up,
+Section~\ref{sec:rb-rollup}).
+\snippet{rb_tree}{Python}{The factor tree (excerpt: the node builder, the region template, the US branch)}
+
+The ancestors of $n$ are $\anc(n)=\{n,\text{parent}(n),\dots,\code{GLOBAL}\}$ (\coderef{rb_ancestors}).
+
+\paragraph{Assets.} The assets are configured in the run's JSON file (\code{assets}; a file that sets it replaces
+the whole table). Asset $i$ has a name, a class $c(i)\in\{\mathrm{EQ},\mathrm{CMD},\mathrm{GOVT},\mathrm{CREDIT}\}$, a
+base budget, a volatility (synthetic data), a Yahoo ticker (real data), and the set $\Phi_i$ of factor nodes it
+may load on, each with an exposure $e_{i,n}\in\{-1,+1\}$:
+\begin{lstlisting}[language=Python]
+"GOLD": {"name": "Gold", "class": "CMD", "budget": 0.15, "vol": 0.15, "ticker": "GC=F",
+         "factors": {"GLOBAL": 1, "CMD": 1, "CMD.PRECIOUS": 1, "CMD.PRECIOUS.GOLD": 1, "US.FX.USD": -1}}
+\end{lstlisting}
+The features of these nodes are the asset's candidates, and the elastic net (Chapter~\ref{ch:rb-model}) learns the
+mapping from sentiment to the asset's returns. Its non-negative coefficients choose and weight the factors that
+predict. A negative exposure turns a factor around: a strong dollar weighs on dollar-priced commodities, a strong
+euro on euro-area exporters. Loading on several regions' factors, as oil does on \code{APAC.MACRO.CN}, needs no
+change to the tree. The loader checks that every listed factor is a node of the taxonomy (\coderef{rb_factors}).
+\snippet{rb_factors}{Python}{The factors of an asset: from its configuration}
 
 Every feature $k$ is attached to a node $\nu(k)$ and carries a \emph{sign per asset class} $\sigma_{k,c}\in\{-1,0,1\}$
 that orients it: after orientation, higher means more bullish for the asset's price. Risk-off is bullish for
 government bonds, so a risk-appetite indicator has $\sigma_{k,\mathrm{GOVT}}=-1$. The candidate features of asset
-$i$ are those of all its ancestors that are not switched off for its class:
+$i$ are those of all its factors that are not switched off for its class, multiplied by the exposure:
 \[
-  \mathcal F_i=\{\,k:\ \nu(k)\in\anc(n_i),\ \sigma_{k,c(i)}\ne0\,\}.
+  \mathcal F_i=\{\,k:\ \nu(k)\in\Phi_i,\ \sigma_{k,c(i)}\ne0\,\},\qquad x^{(i)}_k=e_{i,\nu(k)}\,\sigma_{k,c(i)}\,z_k.
 \]
 Each feature enters once (the matrix is keyed by feature), which the tests check
-(\code{test\_assets\_inherit\_every\_ancestor\_feature\_once}).
+(\code{test\_assets\_inherit\_every\_factor\_feature\_once}): the dollar index, attached to \code{US.FX.USD},
+reaches gold and oil with sign $-1$ and no US equity or bond.
+Every factor of a mixed class (global, region, macro, central bank) is risk appetite: its LLM features take the
+risk-on sign of each class, like the indicators at \code{GLOBAL}.
 \snippet{rb_asset_matrix}{Python}{Candidate features of an asset, oriented}
 
 \section{Point-in-time alignment and transforms}
@@ -120,12 +161,18 @@ Three prompts, stored as versioned files in \code{prompts/} (system and user tem
   \item[A, triage] (a small model): is the article relevant, which taxonomy nodes does it concern, with which
         relevance and channel (\emph{direct}: the node's asset is the subject; \emph{spillover}: affected through
         a sector, competitor or macro link). Market recaps are marked irrelevant.
-  \item[B, scoring] (a stronger model): for each node, the sentiment in $[-1,1]$ for the asset's price over the
-        next 1--20 trading days, a confidence, magnitude, horizon, surprise versus expectations, fact type and a
-        short rationale. Government bonds: hawkish policy and upside inflation are negative.
+  \item[B, scoring] (a stronger model): for each node, the sentiment in $[-1,1]$ for its market's prices over the
+        next 1--20 trading days, and a confidence. Only what the features use is asked for, because each output
+        token costs generation time. Government bonds: hawkish policy and upside inflation are negative.
   \item[C, digest] (one call per day, on the day's deduplicated headlines): risk appetite, growth tone, inflation
         tone, geopolitical stress, credit tone, central-bank tone per bank, commodity supply tone per complex.
 \end{description}
+Each prompt puts what is the same for every call in its system part: the instructions, the JSON schema, and for
+triage the whole taxonomy (85 lines). The user part holds only the article, or the day's headlines for the digest.
+A local model (Ollama) then reuses the processed prefix from one call to the next. With gemma4:26b this cut a triage
+call's prompt processing from 2.4~s to 0.25~s, and the whole scoring of an article from about 6.8~s to 3~s. The
+cache key covers both parts.
+
 Each response is validated against a pydantic schema (\coderef{rb_triage_schema}, \coderef{rb_score_schema},
 \coderef{rb_digest_schema}): numbers in range, categories from closed lists. A malformed response is retried up to
 twice, then logged and skipped. Every call is appended to \code{llm\_audit.jsonl} with the prompt version (file
@@ -196,10 +243,25 @@ Feature & Definition & Orientation \\
 \bottomrule
 \end{tabular}
 \end{center}
-LLM sentiment is defined with respect to the price of the node's asset, so its sign is $+1$ for the node's subtree,
-except at \code{L0.GLOBAL}, where it is risk appetite and takes the risk-on sign of each class. Like every indicator
+LLM sentiment is defined with respect to the prices of the node's market, so its sign is $+1$ for assets of the
+node's class, except at the mixed nodes (global, regions, macro, central banks), where it is risk appetite and takes
+the risk-on sign of each class. On the mixed region,
+macro and policy nodes positive means risk-on for that market (dovish for a central bank), on a currency node that
+the currency strengthens (the scoring prompt states these conventions). Like every indicator
 they are lagged (one day), z-scored and oriented (Chapter~\ref{ch:rb-features}).
 \snippet{rb_node_features}{Python}{The five LLM features of every node}
+
+\paragraph{Roll-up.}\label{sec:rb-rollup} Most nodes have no asset under them: a score on \code{US.EQ.TECH} would
+otherwise never reach the S\&P 500, which sits beside it under \code{US.EQ}. So every score also counts for the
+ancestors of its node \emph{that have the same asset class}, its weight multiplied by $\rho^{\ell}$ at $\ell$ levels
+up ($\rho=$\code{llm.rollup}$\,=0.5$; 0 switches it off):
+\[
+  w_{a,m}=\rho^{\ell(n_a,m)}\,w_a,\qquad m\in\anc(n_a),\ \text{class}(m)=\text{class}(n_a)\ \text{on the whole path}.
+\]
+Sentiment is about the prices of one class, so it never flows into a parent of another class: tech news feeds
+\code{US.EQ} (a factor of the S\&P 500) but stops below the mixed \code{US} region; Chinese macro news climbs \code{APAC.MACRO}, \code{APAC} and
+\code{GLOBAL}, all mixed (\coderef{rb_rollup}).
+\snippet{rb_rollup}{Python}{Same-class ancestors of a node}
 
 \section{The daily digest}
 Prompt C's outputs become features of their node, with a sign per class, e.g. inflation tone negative for equities,
@@ -460,24 +522,25 @@ So that the pipeline runs offline and its behaviour can be tested against a know
 $f_{n,t}=\phi f_{n,t-1}+\sqrt{1-\phi^2}\,\varepsilon_{n,t}$, $\phi=0.97$ (half-life about three weeks). Asset $i$'s
 daily return is
 \[
-  r_{i,t}=\frac{\sigma_i}{\sqrt{252}}\Big(\kappa\,\frac{\sum_{n\in\anc(n_i)}\sigma^{\mathrm{f}}_{n,c(i)}f_{n,t}}{\sqrt{|\anc(n_i)|}}
+  r_{i,t}=\frac{\sigma_i}{\sqrt{252}}\Big(\kappa\,\frac{\sum_{n\in\Phi_i}e_{i,n}\,\sigma^{\mathrm{f}}_{n,c(i)}f_{n,t}}{\sqrt{|\Phi_i|}}
   +\ell_{c(i)}\,g_t+\sqrt{1-\ell_{c(i)}^2}\,\eta_{i,t}\Big)+\mathrm{SR}_{c(i)}\frac{\sigma_i}{252},
 \]
 with annual volatilities $\sigma_i$, signal strength $\kappa=0.15$, a common shock $g$ with class loadings $\ell$
 (government bonds negative), and a risk premium of Sharpe ratio $\mathrm{SR}$ per class; the factor sign
-$\sigma^{\mathrm f}$ is the risk-on sign at \code{L0.GLOBAL} and $+1$ below. Each indicator is a noisy reading of
+$\sigma^{\mathrm f}$ is the risk-on sign at the mixed nodes and $+1$ at the class nodes. Each indicator is a noisy reading of
 its node's factor with a slowly drifting level (or, for transform ``diff'', a stock whose changes carry the signal);
 some indicators are pure noise, for the model to discard.
 
 \section{Synthetic news with a known skill}\label{sec:rb-oracle}
 The default news generator is an \emph{oracle} with a set skill (\coderef{rb_news_truth}). For node $n$, let
-$x_{n,t}$ be the mean over its assets of the oriented forward target, shifted by the LLM lag so that it starts when
+$x_{n,t}$ be the mean, over the assets that load on it ($n\in\Phi_i$), of the exposure-signed and oriented forward target, shifted by the LLM lag so that it starts when
 the news becomes usable, and $z_{n,t}$ its standardized value. The node's true tone is
 \[
   T_{n,t}=\rho\,z_{n,t}+\sqrt{1-\rho^2}\,\epsilon_{n,t},\qquad\operatorname{corr}(T_{n,t},z_{n,t})=\rho ,
 \]
 where $\rho$ is the \emph{news IC} (\code{synthetic.sentiment\_ic}, 0.2 by default): 0 is pure noise, 1 perfect
-foresight. About four articles a day are drawn (more often for global and asset-class nodes), each with tone
+foresight. A node that no asset loads on (a sector or central bank outside every $\Phi_i$) gets its parent's
+tone plus noise, $T_{n,t}=0.7\,T_{\text{parent}(n),t}+\sqrt{1-0.7^2}\,\epsilon_{n,t}$. About four articles a day are drawn (more often for the global, region and commodity-complex nodes), each with tone
 $\tanh(T_{n,t}+0.3\,\epsilon_a)$; 12\% are market recaps (irrelevant) and 10\% re-publications (duplicates); the mock
 LLM adds scoring noise; the digest derives from the same truths. The rest of the pipeline is unchanged: it must find
 the edge through point-in-time features, the purged elastic net, normalization and the budget rules. Setting

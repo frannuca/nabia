@@ -78,7 +78,7 @@ def test_store_appends_without_duplicates_and_the_pipeline_reads_it(tmp_path):
 
 def test_scores_file_round_trip_maps_to_trading_days(tmp_path):
     details = {0: {"id": 0, "received_ts": "2024-01-06 15:00:00", "headline": "h", "relevant": True,  # a Saturday
-                   "scores": [{"node_id": "L3.WTI", "sentiment": 0.5, "weight": 0.6}]}}
+                   "scores": [{"node_id": "CMD.ENERGY.CRUDE", "sentiment": 0.5, "weight": 0.6}]}}
     digest = Digest(risk_appetite=0.2, growth_tone=0.1, inflation_tone=0.0, geopolitical_stress=0.3, credit_tone=0.0,
                     cb_tone={"FED": None}, commodity_supply_tone={"energy": 0.4}, item_count_used=1, key_drivers=["x"])
     write_scores(tmp_path / "s.json", details, {pd.Timestamp("2024-01-05"): digest}, {"model": "m"})

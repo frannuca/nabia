@@ -16,6 +16,7 @@ import pandas as pd
 
 from nabia_python_bridge import frames, risk, strategy
 
+from ..features.tree import base_budgets
 from .budgets import directions, modulate
 
 
@@ -43,7 +44,7 @@ def simulate(cfg, returns, sched, dirs):
     (the last schedule row at or before it; b0 / long before the first), drifting weights, costs on turnover."""
     P, R, dates = cfg["portfolio"], returns.values, returns.index
     W, (T, N) = P["covariance_window"], R.shape
-    b0 = np.array([cfg["assets"][a][2] for a in returns.columns])
+    b0 = base_budgets(cfg, returns.columns)
     rows = set(range(W - 1, T, P["rebalance_frequency"]))
     w, equity, rec, targets, rcs = np.zeros(N), 1.0, [], {}, {}
     for t in range(T):
@@ -68,6 +69,16 @@ def simulate(cfg, returns, sched, dirs):
                            risk_contributions=pd.DataFrame(rcs, returns.columns).T)
 
 
+def rebalance_step(cfg, s, b0, prev_b, prev_d):
+    """(budgets, directions) at a rebalance from the sentiment s and the previous ones: in long-short mode the side
+    follows s with hysteresis and the budget is b0 (or modulated by the conviction); long-only modulates by s."""
+    B = cfg["budgets"]
+    d = directions(cfg, s, prev_d) if B["mode"] == "long_short" else np.ones(len(s))
+    conviction = np.where(d > 0, s, 1 - s)  # long_only: = s
+    b = b0 if B["mode"] == "long_short" and not B["modulate_long_short"] else modulate(cfg, conviction, b0, prev_b)
+    return b, d
+
+
 def backtests(cfg, returns, s, b0):
     """Plain ERC with b0 (nabia engine) and the sentiment overlay in the configured mode, with the same covariance,
     rebalancing and costs. Returns (bench, overlay, budget schedule, direction schedule)."""
@@ -78,11 +89,7 @@ def backtests(cfg, returns, s, b0):
     for day in bench.target_weights.index:
         if day not in s.index:
             continue
-        sd = s.loc[day].values
-        prev_d = dirs[day] = directions(cfg, sd, prev_d) if B["mode"] == "long_short" else np.ones(len(assets))
-        conviction = np.where(prev_d > 0, sd, 1 - sd)  # long_only: = s
-        prev_b = sched[day] = (b0 if B["mode"] == "long_short" and not B["modulate_long_short"]
-                               else modulate(cfg, conviction, b0, prev_b))
+        prev_b, prev_d = sched[day], dirs[day] = rebalance_step(cfg, s.loc[day].values, b0, prev_b, prev_d)
     sched, dirs = pd.DataFrame(sched, index=assets).T, pd.DataFrame(dirs, index=assets).T
     if B["mode"] == "long_only":
         overlay = frames.backtest(returns, budgets=dict(zip(assets, b0)), budget_schedule=sched, **P)

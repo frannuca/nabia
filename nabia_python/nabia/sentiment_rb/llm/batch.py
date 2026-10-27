@@ -15,8 +15,8 @@ MAX_REQUESTS = 100_000  # per batch (API limit)
 
 
 def submit(llm, kind, requests):
-    """requests: (user prompt, cache key) pairs of one kind. Returns the number of responses cached."""
-    todo = {key: user for user, key in requests if key not in llm.cache}
+    """requests: ((system, user) prompt, cache key) pairs of one kind. Returns the number of responses cached."""
+    todo = {key: prompt for prompt, key in requests if key not in llm.cache}
     keys, stored = list(todo), 0
     for start in range(0, len(keys), MAX_REQUESTS):
         chunk = keys[start:start + MAX_REQUESTS]

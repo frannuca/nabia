@@ -44,6 +44,15 @@ signal, selection frequencies, in-sample vs out-of-sample IC), the LLM audit log
   capped at ±25% change per rebalance; nabia's backtest engine computes the weights.
 - **Long-short**: an asset is shorted when s < `short_below` (long again above `long_above`); it keeps its risk
   budget, its returns change sign, and the optimizer works on D Σ D (D = diag(±1)), weights D w'.
+- **Sentiment factor tree** (`TREE` in `config.py`, 85 nodes, sentiment only): a global factor at the root; the
+  regions US, EU and APAC, each with macro data, central banks, equity sectors, government bonds, credit and
+  currencies; and the commodity complex (energy, precious, industrial metals, agriculture). Each news score also
+  feeds the same-class ancestors of its node, x `llm.rollup` (0.5) per level, so detail news (e.g. `US.EQ.TECH`)
+  reaches the broader nodes (`US.EQ`).
+- **Assets** are not in the tree: the run's JSON lists them (`assets`, replacing the default table), each with its
+  name, class, base budget, volatility, Yahoo ticker and the factor nodes it may load on, with a sign, e.g. gold:
+  `{"GLOBAL": 1, "CMD": 1, "CMD.PRECIOUS": 1, "CMD.PRECIOUS.GOLD": 1, "US.FX.USD": -1}`. Those nodes' features are
+  the asset's candidates, and the elastic net learns the mapping.
 - **Synthetic news with a known skill**: each node's tone correlates with its assets' forward returns
   (`synthetic.sentiment_ic`); `--ic-sweep` measures how much of that edge survives the pipeline.
 
@@ -67,6 +76,51 @@ signal, selection frequencies, in-sample vs out-of-sample IC), the LLM audit log
 - **Live scoring** (`--live`, `pip install -e ".[llm]"`, `ANTHROPIC_API_KEY`): `"llm": {"live_days": 0}` scores every
   day; every response is cached in `data/llm_cache.jsonl`, so an article is paid for once; `--batch` first submits the
   uncached requests as Message Batches (triage, then scoring, then digests).
+
+### Run configurations and the weights script
+
+```sh
+.venv/bin/python -m nabia.sentiment_rb --config configs/synthetic.json --out output/syn   # full report, synthetic
+.venv/bin/python -m nabia.sentiment_rb --config configs/real.json --out output/real        # full report, real
+.venv/bin/python scripts/sentiment_weights.py configs/real.json                            # weights only
+```
+
+- `config.py` has three parts: `CONFIG`, the methodology shared by every run (factor tree, assets, features,
+  model, budgets, portfolio, LLM); and `SYNTHETIC` and `REAL`, the data settings of each kind of run. A JSON file
+  chooses one with `data.source` and overrides any key (`configs/synthetic.json`, `configs/real.json`).
+- `scripts/sentiment_weights.py CONFIG.json` computes the signal, budgets, directions and weights over the lookback
+  window `backtest.lookback_days`, ending at `backtest.as_of` (null = the last date; a date also cuts the data there).
+  The news comes from `data.scores_file` (no model calls), or else from `data.news_file` scored with `llm.provider`
+  (`mock` offline, or `ollama` / `anthropic`). It writes `signal.csv`, `rebalances.csv` (date, asset, s, direction,
+  budget, weight, risk contribution), `current.csv` (the position to hold) and `summary.json` (the position and the
+  window's performance against ERC) to `backtest.out`.
+
+### The staged real-data pipeline
+
+```sh
+.venv/bin/python scripts/pipeline/collect_news_1.py configs/real.json      # articles -> data.news_file
+.venv/bin/python scripts/pipeline/digest_news_2.py configs/real.json       # LLM daily digests -> data.digests_file
+.venv/bin/python scripts/pipeline/score_news_3.py configs/real.json        # LLM article scores -> data.scores_file
+.venv/bin/python scripts/pipeline/calibrate_betas_4.py configs/real.json   # elastic-net betas -> data.betas_file
+.venv/bin/python scripts/pipeline/backtest_5.py configs/real.json          # portfolio with the stored betas -> backtest.out
+```
+
+Each step reads the files of the steps before it, so a step runs once and the later ones reuse its result
+(`nabia/sentiment_rb/stages.py`):
+
+1. **Collect** (`collect`: rss, feeds, gkg, since, until, per_day, weekends, workers): new articles, deduplicated,
+   appended to `data.news_file`. Run it again, e.g. daily, to add the latest items.
+2. **Digest**: the LLM (`llm.provider`: ollama, anthropic, or mock offline) writes one macro digest per day (risk
+   appetite, growth, inflation, geopolitics, credit, central banks, commodity supply).
+3. **Score**: the LLM routes every article to the factor-tree nodes it concerns and scores its sentiment per node.
+   Steps 2 and 3 save their file every 25 items, and cache every response in `llm.cache`, so a run resumes.
+4. **Calibrate**: the market data and both sentiment files give each asset its candidate features (from its
+   factors). The purged walk-forward elastic net is fitted at every refit date, and the betas are stored per refit
+   date and asset (non-zero coefficients, the candidate features, the model settings).
+5. **Backtest**: the stored betas map the aggregated sentiment to each asset's S and s, from the day after each
+   refit to the next. Budgets and directions follow (`budgets`), and the portfolio is backtested against ERC.
+   Writes the report tables and figures and the positions (`backtest`: lookback_days, as_of, out). A calibration
+   whose features no longer match the configuration is refused: calibrate again.
 
 ### News: download, score, use
 
@@ -96,12 +150,12 @@ signal, selection frequencies, in-sample vs out-of-sample IC), the LLM audit log
 |---|---|---|
 | — | `config.py`, `pipeline.py`, `__main__.py` | settings, `run()`, command line and sweep |
 | `data/` | `synthetic.py`, `real.py`, `example_news.py` | synthetic data; real prices, indicators and news files; example news |
-| `features/` | `tree.py`, `transforms.py` | indicator tree; point-in-time transforms, candidate features, target |
+| `features/` | `tree.py`, `transforms.py` | factor tree (ancestors, roll-up, orientation) and the assets' factors; point-in-time transforms, candidate features, target |
 | `llm/` | `schemas.py`, `client.py`, `news.py`, `lexicon.py`, `batch.py` | schemas; mock or cached Anthropic client; dedup, scoring, node features; offline text scorer; Message Batches |
 | `model/` | `elastic_net.py` | elastic net per asset (purged walk-forward CV, positivity, stability), score S and s |
 | `portfolio/` | `budgets.py`, `backtest.py` | budgets and directions; backtests, long-short simulator, risk-contribution check |
 | `report/` | `tables.py`, `figures.py` | tables and CSV; figures |
-| `prompts/` | `triage_v1.md`, `scoring_v1.md`, `digest_v1.md` | versioned prompts |
+| `prompts/` | `triage.md`, `scoring.md`, `digest.md` | prompts (version = hash of the file) |
 
 The specification is [`../doc/sentiment_risk_budgeting_spec.md`](../doc/sentiment_risk_budgeting_spec.md).
 

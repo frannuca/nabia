@@ -17,14 +17,14 @@ from pathlib import Path
 
 import numpy as np
 
-from ..config import load_config, merge
+from ..config import SYNTHETIC, load_config, merge
 from .real import NEWS_COLUMNS, real_market
 from .synthetic import news_truth, synthetic_news
 
 
 def make_example_news(cfg, returns, rng, ic):
     """Articles (real-news columns only) whose tone has correlation `ic` with each node's forward returns."""
-    oracle = merge(json.loads(json.dumps(cfg)), {"synthetic": {"sentiment": "oracle", "sentiment_ic": ic}})
+    oracle = merge(json.loads(json.dumps(cfg)), {"synthetic": {**SYNTHETIC["synthetic"], "sentiment": "oracle", "sentiment_ic": ic}})
     truth = news_truth(oracle, None, returns, rng)
     return synthetic_news(oracle, truth, rng)[NEWS_COLUMNS]
 
@@ -44,12 +44,12 @@ def main():
     ap.add_argument("--config", type=Path, help="JSON overrides (assets, dates, data.cache_dir, ...)")
     ap.add_argument("--seed", type=int, default=7)
     args = ap.parse_args()
-    cfg = load_config(args.config)
+    cfg = load_config(args.config, "real")
     returns, _ = real_market(cfg)
     news = make_example_news(cfg, returns, np.random.default_rng(args.seed), args.ic)
     meta = {"description": "Example news generated from real asset returns: each node's tone correlates with the "
                            "forward vol-scaled return of its assets (it looks ahead on purpose). Replace with real news.",
-            "ic": args.ic, "seed": args.seed, "horizon_days": cfg["horizon"], "assets": cfg["real"]["assets"],
+            "ic": args.ic, "seed": args.seed, "horizon_days": cfg["horizon"], "assets": {a: v["ticker"] for a, v in cfg["assets"].items()},
             "start": str(returns.index[0].date()), "end": str(returns.index[-1].date())}
     write_news(news, args.out, meta)
     print(f"{len(news)} articles, {returns.index[0].date()} .. {returns.index[-1].date()}, IC {args.ic} -> {args.out}")

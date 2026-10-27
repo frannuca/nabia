@@ -12,6 +12,7 @@ import pandas as pd
 
 from nabia_python_bridge import signal
 
+from ..features.tree import rollup
 from .client import fill
 
 
@@ -41,7 +42,8 @@ def run_all(work, items, llm, label, checkpoint=None):
     return results
 
 
-def run_news(cfg, news, dates, llm, live_from, truth=None, details=None, digests_out=None, checkpoint=None):
+def run_news(cfg, news, dates, llm, live_from, truth=None, details=None, digests_out=None, checkpoint=None,
+             stages=("articles", "digests")):
     """Dedup -> triage -> scoring -> per-node weighted scores by day; daily digest. Returns (scores, digests).
 
     Articles are assigned to the first date at or after the day they were received. Days from live_from on go to the
@@ -49,27 +51,24 @@ def run_news(cfg, news, dates, llm, live_from, truth=None, details=None, digests
     Batches (triage, then scoring, then digests). `truth` (synthetic runs) feeds the offline mock of the digest.
     `details` and `digests_out`, dicts, receive each article's triage and scores and each day's digest as they are
     computed; `checkpoint()` is called every 25 articles or digests (the scoring command saves its file there).
+    `stages` runs only the article scores ("articles") or only the digests ("digests").
     """
     tax, L = cfg["taxonomy"], cfg["llm"]
     if news.empty:
         return pd.DataFrame(columns=["day", "node", "sentiment", "weight"]), {}
-    alias = {v[1]: f"Entity {i}" for i, v in enumerate(tax.values())} if L["anonymize"] else {}
+    alias = {v["name"]: f"Entity {i}" for i, v in enumerate(cfg["assets"].values())} if L["anonymize"] else {}  # asset names
     anon = lambda s: re.sub("|".join(map(re.escape, alias)), lambda m: alias[m[0]], s) if alias else s
-    taxonomy_lines = "\n".join(f"{n} | {anon(v[1])} | {v[2]} | {anon(v[1])}" for n, v in tax.items())
+    taxonomy_lines = "\n".join(f"{n} | {v[1]} | {v[3]} | {v[2] or 'mixed'} | {tax[n][0] or '-'}" for n, v in tax.items())
     news = news.sort_values("received_ts").reset_index(drop=True)
     news["day"] = dates[np.minimum(dates.searchsorted(news.received_ts.dt.normalize()), len(dates) - 1)]
     base = {i: {"publish_ts_utc": a.publish_ts, "source_name": a.source, "headline": anon(a.headline),
                 "body": anon(a.body), "body_truncated_to_N_tokens": anon(a.body)[:4000]} for i, a in news.iterrows()}
     triage_fill = lambda i: (lambda t: fill(t, base[i], taxonomy_lines))
-    node_lines = lambda nodes: "\n".join(f"{m.node_id} | {anon(tax[m.node_id][1])} | {tax[m.node_id][2]} | {m.channel}" for m in nodes)
+    node_lines = lambda nodes: "\n".join(f"{m.node_id} | {tax[m.node_id][1]} | {tax[m.node_id][2] or 'mixed'} | {m.channel}" for m in nodes)
     scoring_fill = lambda i, nodes: (lambda t: fill(t, base[i], node_lines(nodes)))
-    entity = {f"entity {k}": n for k, n in enumerate(tax)}
-
     def canonical(node_id):
-        """The taxonomy node an answer means: models sometimes return the anonymized name ("Entity 3") or copy the
-        whole prompt line ("L1.EQ | Entity 1 | EQ | direct")."""
-        head = node_id.split("|")[0].strip()
-        return head if head in tax else entity.get(head.lower(), node_id)
+        """The taxonomy node an answer means: models sometimes copy the whole prompt line ("US.EQ | US equities | ...")."""
+        return node_id.split("|")[0].strip()
 
     def relevant_nodes(tri):
         if not (tri and tri.relevant):
@@ -79,7 +78,7 @@ def run_news(cfg, news, dates, llm, live_from, truth=None, details=None, digests
             if (node := canonical(m.node_id)) in tax and node not in nodes:
                 nodes[node] = m.model_copy(update={"node_id": node})
         return list(nodes.values())
-    if llm.client is not None and L["batch"]:  # backfill the live days' triage and scoring as batches
+    if llm.client is not None and L["batch"] and "articles" in stages:  # backfill the live days' triage and scoring
         live_rows = [i for i in news.index if news.day[i] >= live_from]
         llm.prefill("triage", [triage_fill(i) for i in live_rows])
         cached = {i: llm.cache.get(llm.request("triage", triage_fill(i))[1]) for i in live_rows}
@@ -113,10 +112,12 @@ def run_news(cfg, news, dates, llm, live_from, truth=None, details=None, digests
         return [(a.day, s.node_id, s.sentiment, rel[s.node_id] * s.confidence * novelty[i] * L["source_weight"].get(a.source, 0.5))
                 for s in scores]
 
-    records = [r for rs in run_all(article, list(news.index), llm, "articles", checkpoint) for r in rs]
+    records = [r for rs in run_all(article, list(news.index), llm, "articles", checkpoint) for r in rs] if "articles" in stages else []
     days = list(news.groupby("day"))
     digest_fill = lambda day, g: (lambda t: fill(t, {"yyyy-mm-dd": day.date()}, "\n".join(
         f"{r.publish_ts} | {r.source} | {anon(r.headline)} | {anon(r.body)}" for r in g.itertuples())))
+    if "digests" not in stages:
+        return pd.DataFrame(records, columns=["day", "node", "sentiment", "weight"]), {}
     llm.prefill("digest", [digest_fill(day, g) for day, g in days if day >= live_from])
 
     def digest(item):
@@ -140,7 +141,10 @@ def ema0(x, half_life):
 
 def node_features(cfg, scores, dates):
     """The 5 LLM features of every node: decay-weighted level, volume, dispersion, 5-day momentum, surprise."""
-    out = {}
+    out, decay = {}, cfg["llm"]["rollup"]
+    if decay and len(scores):  # each score also counts for the same-class ancestors, weighted decay**level
+        scores = pd.DataFrame([(d, a, s, w * decay**k) for d, n, s, w in scores[["day", "node", "sentiment", "weight"]].itertuples(index=False)
+                               for a, k in (rollup(cfg, n) if n in cfg["taxonomy"] else [(n, 0)])], columns=["day", "node", "sentiment", "weight"])
     for node in cfg["taxonomy"]:
         g = scores[scores.node == node].assign(ws=lambda d: d.weight * d.sentiment).groupby("day")
         day = g.agg(ws=("ws", "sum"), w=("weight", "sum"), n=("sentiment", "size"), sd=("sentiment", "std")).reindex(dates)

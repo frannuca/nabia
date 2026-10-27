@@ -68,9 +68,9 @@ def indicator(cfg, source, symbol):
 def real_market(cfg):
     """Daily returns of the assets on the US trading calendar (other markets' holidays forward-filled, at most 3 days)
     and the levels of the configured indicators, each as of its last observation on or before every date."""
-    R, D = cfg["real"], cfg["data"]
-    prices = pd.DataFrame({a: yahoo(cfg, R["assets"][a]) for a in cfg["assets"]})
-    calendar = yahoo(cfg, R["assets"][next(iter(cfg["assets"]))]).loc[D["start"]:D["end"]].index
+    R, D, tickers = cfg["real"], cfg["data"], {a: v["ticker"] for a, v in cfg["assets"].items()}
+    prices = pd.DataFrame({a: yahoo(cfg, t) for a, t in tickers.items()})
+    calendar = yahoo(cfg, next(iter(tickers.values()))).loc[D["start"]:D["end"]].index
     prices = prices.reindex(prices.index.union(calendar)).ffill(limit=3).reindex(calendar)
     returns = prices.pct_change().iloc[1:].dropna()
     raw = {}

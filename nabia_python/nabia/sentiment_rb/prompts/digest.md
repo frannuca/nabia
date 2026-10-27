@@ -12,11 +12,6 @@ Definitions (-1..+1):
 - credit_tone: +1 easing credit conditions / strong issuance, -1 stress/defaults.
 - commodity_supply_tone (energy, metals, ags): +1 supply tightening, -1 loosening.
 Give key_drivers as up to 5 short phrases. Respond with JSON only.
-=== USER ===
-<date>{yyyy-mm-dd}</date>
-<items>
-{ts | source | headline | 1–2 sentence summary}   (deduplicated, max ~300 items)
-</items>
 
 Schema:
 {
@@ -28,3 +23,8 @@ Schema:
   "item_count_used": int,
   "key_drivers": [str]
 }
+=== USER ===
+<date>{yyyy-mm-dd}</date>
+<items>
+{ts | source | headline | 1–2 sentence summary}   (deduplicated, max ~300 items)
+</items>

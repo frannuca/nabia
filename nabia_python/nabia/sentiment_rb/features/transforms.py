@@ -8,7 +8,7 @@ import pandas as pd
 from nabia_python_bridge import signal
 
 from ..config import RISK_ON
-from .tree import ancestors, sign_for
+from .tree import asset_class, factors, is_mixed, sign_for
 
 
 def transform(cfg, series, lag, kind):
@@ -27,7 +27,7 @@ def build_features(cfg, raw, llm_nodes, digests, dates):
         kind, node = col[4:].split("@")
         s = cfg["llm_feature_signs"][kind]
         feats[col] = (transform(cfg, llm_nodes[col], cfg["llm"]["lag"], "z"), node,
-                      {c: s * RISK_ON[c] for c in RISK_ON} if node == "L0.GLOBAL" else s)
+                      {c: s * RISK_ON[c] for c in RISK_ON} if is_mixed(cfg, node) else s)
     for name, (node, sign, path) in cfg["digest_features"].items():
         values = {d: (lambda v: v if v is not None else 0.0)(
             getattr(dg, path[0]) if len(path) == 1 else getattr(dg, path[0]).get(path[1])) for d, dg in digests.items()}
@@ -36,10 +36,10 @@ def build_features(cfg, raw, llm_nodes, digests, dates):
 
 
 def asset_matrix(cfg, feats, asset):
-    """Candidate features of an asset: those of every ancestor node, oriented (+ = bullish), each exactly once."""
-    node, cls = cfg["assets"][asset][:2]
-    path = set(ancestors(cfg, node))
-    cols = {fid: sign_for(sign, cls) * z for fid, (z, n, sign) in feats.items()
+    """Candidate features of an asset: those of the factor nodes it may load on, oriented (+ = bullish for the
+    asset: the feature's sign for its class times the exposure), each exactly once."""
+    cls, path = asset_class(cfg, asset), factors(cfg, asset)
+    cols = {fid: path[n] * sign_for(sign, cls) * z for fid, (z, n, sign) in feats.items()
             if n in path and sign_for(sign, cls) and z.notna().any()}  # features with no data at all are left out
     return pd.DataFrame(cols)
 

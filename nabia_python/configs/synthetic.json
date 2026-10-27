@@ -1,0 +1,105 @@
+{
+  "data": {
+    "source": "synthetic"
+  },
+  "seed": 7,
+  "start": "2015-01-01",
+  "days": 2600,
+  "synthetic": {
+    "sentiment": "oracle",
+    "sentiment_ic": 0.3,
+    "article_noise": 0.3,
+    "signal_strength": 0.15,
+    "factor_persistence": 0.97
+  },
+  "llm": {
+    "provider": "mock"
+  },
+  "budgets": {
+    "mode": "long_short",
+    "short_below": 0.3,
+    "long_above": 0.7,
+    "modulate_long_short": true
+  },
+  "assets": {
+    "SPX": {
+      "name": "S&P 500",
+      "class": "EQ",
+      "budget": 0.2,
+      "vol": 0.16,
+      "factors": {
+        "GLOBAL": 1,
+        "US": 1,
+        "US.EQ": 1
+      }
+    },
+    "SX5E": {
+      "name": "Euro Stoxx 50",
+      "class": "EQ",
+      "budget": 0.15,
+      "vol": 0.18,
+      "factors": {
+        "GLOBAL": 1,
+        "EU": 1,
+        "EU.EQ": 1,
+        "EU.FX.EUR": -1
+      }
+    },
+    "WTI": {
+      "name": "Crude oil",
+      "class": "CMD",
+      "budget": 0.1,
+      "vol": 0.35,
+      "factors": {
+        "GLOBAL": 1,
+        "CMD": 1,
+        "CMD.ENERGY": 1,
+        "CMD.ENERGY.CRUDE": 1,
+        "US.FX.USD": -1,
+        "APAC.MACRO.CN": 1
+      }
+    },
+    "GOLD": {
+      "name": "Gold",
+      "class": "CMD",
+      "budget": 0.15,
+      "vol": 0.15,
+      "factors": {
+        "GLOBAL": 1,
+        "CMD": 1,
+        "CMD.PRECIOUS": 1,
+        "CMD.PRECIOUS.GOLD": 1,
+        "US.FX.USD": -1
+      }
+    },
+    "UST10": {
+      "name": "US 10y Treasury note",
+      "class": "GOVT",
+      "budget": 0.25,
+      "vol": 0.07,
+      "factors": {
+        "GLOBAL": 1,
+        "US": 1,
+        "US.RATES": 1,
+        "US.RATES.LONG": 1
+      }
+    },
+    "HY": {
+      "name": "US high yield bonds",
+      "class": "CREDIT",
+      "budget": 0.15,
+      "vol": 0.06,
+      "factors": {
+        "GLOBAL": 1,
+        "US": 1,
+        "US.CREDIT": 1,
+        "US.CREDIT.HY": 1
+      }
+    }
+  },
+  "backtest": {
+    "lookback_days": 252,
+    "as_of": null,
+    "out": "output/backtest_synthetic"
+  }
+}

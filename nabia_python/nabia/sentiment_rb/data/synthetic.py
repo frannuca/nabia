@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 from ..features.transforms import vol_scaled_target
-from ..features.tree import ancestors, node_sign
+from ..features.tree import ancestors, asset_class, factors, node_sign
 
 
 def ar1(rng, n, k, phi):
@@ -23,9 +23,9 @@ def synthetic_market(cfg, rng):
     f = pd.DataFrame(ar1(rng, len(dates), len(nodes), syn["factor_persistence"]), dates, nodes)  # latent sentiment
     common = rng.standard_normal(len(dates))
     returns = {}
-    for a, (node, cls, _, vol) in cfg["assets"].items():
-        path = ancestors(cfg, node)
-        drift = sum(node_sign(cfg, n, cls) * f[n] for n in path) / np.sqrt(len(path))
+    for a, spec in cfg["assets"].items():
+        cls, vol, path = spec["class"], spec["vol"], factors(cfg, a)
+        drift = sum(e * node_sign(cfg, n, cls) * f[n] for n, e in path.items()) / np.sqrt(len(path))
         load = syn["market_loading"][cls]
         shock = load * common + np.sqrt(1 - load**2) * rng.standard_normal(len(dates))
         returns[a] = (syn["signal_strength"] * drift + shock) * vol / np.sqrt(252) + syn["sharpe"][cls] * vol / 252
@@ -49,8 +49,13 @@ def news_truth(cfg, f, returns, rng):
     fwd = pd.DataFrame({a: vol_scaled_target(cfg, returns[a]).shift(-lag) for a in returns})
     truth = {}
     for node in cfg["taxonomy"]:
-        members = [a for a, v in cfg["assets"].items() if node in ancestors(cfg, v[0])]
-        x = sum(node_sign(cfg, node, cfg["assets"][a][1]) * fwd[a] for a in members) / len(members)
+        members = {a: e for a in cfg["assets"] if (e := factors(cfg, a).get(node))}
+        if not members:  # a detail factor no asset loads on: its parent's tone, plus noise
+            parent = cfg["taxonomy"][node][0]
+            truth[node] = 0.7 * truth[parent] + np.sqrt(1 - 0.7**2) * rng.standard_normal(len(fwd)) if parent in truth \
+                else pd.Series(rng.standard_normal(len(fwd)), fwd.index)
+            continue
+        x = sum(e * node_sign(cfg, node, asset_class(cfg, a)) * fwd[a] for a, e in members.items()) / len(members)
         z = ((x - x.mean()) / x.std()).fillna(0.0)  # the last h days have no future: pure noise
         truth[node] = ic * z + np.sqrt(1 - ic**2) * rng.standard_normal(len(z))
     return pd.DataFrame(truth)
@@ -63,7 +68,7 @@ PHRASES = [(-0.6, "slumps on severe downturn fears warning"), (-0.25, "weakens a
 
 def synthetic_news(cfg, truth, rng):
     tax, nodes, arts = cfg["taxonomy"], list(cfg["taxonomy"]), []
-    p = np.array([4 if n.startswith("L0") else 2 if n.startswith("L1") else 1 for n in nodes], float)
+    p = np.array([{1: 4, 2: 2}.get(len(ancestors(cfg, n)), 1) for n in nodes], float)  # broad news is more frequent
     for t in truth.index:
         for _ in range(rng.poisson(cfg["llm"]["news_per_day"])):
             node = rng.choice(nodes, p=p / p.sum())

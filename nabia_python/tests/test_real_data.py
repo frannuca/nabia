@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from nabia.sentiment_rb.config import load_config, merge
+from nabia.sentiment_rb.config import SYNTHETIC, load_config, merge
 from nabia.sentiment_rb.data import load_news, real_market, synthetic_market
 from nabia.sentiment_rb.data.example_news import make_example_news, write_news
 from nabia.sentiment_rb.features import vol_scaled_target
@@ -17,7 +17,8 @@ from nabia.sentiment_rb.llm import LLM, lexicon, node_features, run_news
 
 @pytest.fixture
 def cfg(tmp_path):
-    return merge(load_config(), {"days": 1200, "data": {"cache_dir": str(tmp_path / "cache")},
+    synthetic = {k: v for k, v in json.loads(json.dumps(SYNTHETIC)).items() if k != "data"}  # for synthetic_market
+    return merge(merge(load_config(source="real"), synthetic), {"days": 1200, "data": {"cache_dir": str(tmp_path / "cache")},
                                  "llm": {"cache": str(tmp_path / "llm_cache.jsonl")}})
 
 
@@ -26,9 +27,11 @@ def test_lexicon_reads_the_example_vocabulary_and_finds_the_most_specific_node(c
                "gains on improving demand outlook", "surges after strong upside surprise"]
     tones = [lexicon.tone(p) for p in phrases]
     assert tones == sorted(tones) and tones[0] < -0.5 and tones[2] == 0 and tones[-1] > 0.5
-    assert lexicon.match_node(cfg, "US high yield gains") == "L3.HY"
-    assert lexicon.match_node(cfg, "High yield credit weakens") == "L2.FI.HY"
-    assert lexicon.match_node(cfg, "Brent crude jumps") == "L3.WTI"
+    assert lexicon.match_node(cfg, "US high yield gains") == "US.CREDIT.HY"
+    assert lexicon.match_node(cfg, "Corporate bonds weaken") == "US.CREDIT"
+    assert lexicon.match_node(cfg, "Bank of Japan surprises markets") == "APAC.CB.BOJ"
+    assert lexicon.match_node(cfg, "Australian dollar slides") == "APAC.FX.AUD"
+    assert lexicon.match_node(cfg, "Brent crude jumps") == "CMD.ENERGY.CRUDE"
     assert lexicon.match_node(cfg, "Unrelated headline") is None
     assert lexicon.is_recap("Gold moved +1.2% in today's session")
 
@@ -41,7 +44,7 @@ def test_example_news_carries_its_skill_through_the_offline_scorer(cfg, tmp_path
     assert list(loaded.columns) == ["id", "publish_ts", "received_ts", "source", "headline", "body"] and len(loaded) == len(news)
     dates = returns.index
     scores, digests = run_news(cfg, loaded, dates, LLM(cfg, tmp_path, False, np.random.default_rng(3)), dates[-1] + pd.Timedelta(days=1))
-    level = node_features(cfg, scores, dates)["llm_level@L3.SPX"]
+    level = node_features(cfg, scores, dates)["llm_level@US.EQ"]
     forward = vol_scaled_target(cfg, returns["SPX"]).shift(-cfg["llm"]["lag"])
     assert level.corr(forward) > 0.1 and digests  # the tone read from the text predicts the asset's forward return
 
@@ -50,7 +53,7 @@ def test_real_market_reads_the_csv_cache(cfg):
     cache, dates = Path(cfg["data"]["cache_dir"]), pd.bdate_range("2014-01-01", periods=400)
     cache.mkdir(parents=True)
     rng = np.random.default_rng(0)
-    names = [t.replace("^", "_").replace("=", "_") for t in cfg["real"]["assets"].values()]
+    names = [v["ticker"].replace("^", "_").replace("=", "_") for v in cfg["assets"].values()]
     names += ["_VIX", "_MOVE", "DX-Y.NYB", "CL_F", "RB_F", "HO_F"]
     for name in names:
         pd.Series(100 * np.exp(np.cumsum(rng.normal(0, 0.01, len(dates)))), dates, name="Close").to_csv(cache / f"{name}.csv")
@@ -64,7 +67,7 @@ def test_real_market_reads_the_csv_cache(cfg):
 class FakeClient:
     """The Anthropic client's messages and batches APIs, answering every request with a valid triage."""
     answer = {"relevant": True, "reason": "new_information", "event_type": "other",
-              "nodes": [{"node_id": "L3.SPX", "relevance": 0.9, "channel": "direct"}]}
+              "nodes": [{"node_id": "US.EQ", "relevance": 0.9, "channel": "direct"}]}
 
     def __init__(self):
         self.calls, self.batched = 0, []
@@ -106,3 +109,34 @@ def test_batch_prefill_makes_the_calls_cache_hits(cfg, tmp_path, monkeypatch):
     llm.prefill("triage", fills)  # nothing left to submit
     assert len(llm.client.batched) == 3
     assert json.loads(Path(cfg["llm"]["cache"]).read_text().splitlines()[0])["key"]
+
+
+def test_stored_betas_reproduce_the_walk_forward_scores(cfg, tmp_path):
+    from nabia.sentiment_rb.data.scores import load_betas, write_betas
+    from nabia.sentiment_rb.model import apply_betas, fit_betas, walk_forward_scores
+    dates = pd.bdate_range("2015-01-01", periods=1100)
+    rng = np.random.default_rng(4)
+    f = pd.Series(rng.standard_normal(len(dates)), dates).rolling(10, min_periods=1).mean()
+    X = {a: pd.DataFrame({"good": f, "noise": rng.standard_normal(len(dates))}, dates) for a in ["A", "B"]}
+    y = {a: f.shift(-1).rolling(21).mean().shift(-20) + 0.1 * rng.standard_normal(len(dates)) for a in X}
+    cfg = merge(cfg, {"model": {"stability": {"samples": 10, "threshold": 0.5}, "threads": 1}})
+    S, s, betas, _ = walk_forward_scores(cfg, X, y, dates)
+    write_betas(tmp_path / "betas.json", *fit_betas(cfg, X, y, dates), {a: list(x.columns) for a, x in X.items()}, {})
+    stored, in_sample = load_betas(tmp_path / "betas.json", X)
+    S2, s2, _ = apply_betas(cfg, X, y, dates, stored, in_sample)
+    pd.testing.assert_frame_equal(S, S2)
+    pd.testing.assert_frame_equal(s, s2)
+    assert any(b["good"] > 0 for b in stored.values())
+    with pytest.raises(ValueError, match="calibrate again"):
+        load_betas(tmp_path / "betas.json", {a: x[["noise"]] for a, x in X.items()})
+
+
+def test_news_stages_run_digests_and_article_scores_separately(cfg, tmp_path):
+    _, returns, _ = synthetic_market(cfg, np.random.default_rng(1))
+    news = make_example_news(cfg, returns.iloc[:300], np.random.default_rng(2), ic=0.5)
+    dates, after = returns.index[:300], returns.index[299] + pd.Timedelta(days=1)
+    llm = LLM(cfg, tmp_path, False, np.random.default_rng(3))
+    scores, digests = run_news(cfg, news, dates, llm, after, stages=("articles",))
+    assert len(scores) and not digests
+    scores, digests = run_news(cfg, news, dates, llm, after, stages=("digests",))
+    assert scores.empty and digests

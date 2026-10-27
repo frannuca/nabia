@@ -26,13 +26,18 @@ def fit_asset(cfg, X, y):
     return pd.Series(0.0, X.columns)  # nothing survives: S = 0, neutral
 
 
-def walk_forward_scores(cfg, X_by_asset, y_by_asset, dates):
-    """S (ex-intercept) and s in [0,1] per asset and day, with betas refit on the configured schedule."""
-    M, N, h = cfg["model"], cfg["normalize"], cfg["horizon"]
+def refit_points(cfg, dates):
+    """Row positions of the refit dates: the ends of the refit periods, once there is enough history."""
+    M, h = cfg["model"], cfg["horizon"]
     ends = pd.Series(dates, dates).resample(M["refit"]).last().values
-    refits = [dates.get_loc(d) for d in ends if dates.get_loc(d) >= cfg["z_min"] + M["min_train"] + h]
-    S, betas, ics = pd.DataFrame(np.nan, dates, list(X_by_asset)), {}, []
-    s = S.copy()
+    return [dates.get_loc(d) for d in ends if dates.get_loc(d) >= cfg["z_min"] + M["min_train"] + h]
+
+
+def fit_betas(cfg, X_by_asset, y_by_asset, dates):
+    """The walk-forward calibration: at every refit date, the elastic net of each asset on the data known then
+    (targets purged by the horizon). Returns ({(refit date, asset): betas}, {(refit date, asset): in-sample IC})."""
+    M, h = cfg["model"], cfg["horizon"]
+
     def fit_at(p, a):
         X, lo = X_by_asset[a], 0 if M["window"] == "expanding" else max(0, p - h - M["rolling_days"])
         Xw, yw = X.iloc[lo:p - h + 1], y_by_asset[a].iloc[lo:p - h + 1]
@@ -49,13 +54,29 @@ def walk_forward_scores(cfg, X_by_asset, y_by_asset, dates):
     threads = M.get("threads", 0)
     pool = ThreadPoolExecutor(max_workers=threads or None) if threads != 1 else None
     fits = (lambda p: pool.map(lambda a: fit_at(p, a), X_by_asset)) if pool else (lambda p: map(lambda a: fit_at(p, a), X_by_asset))
-    for k, p in enumerate(refits):
-        stop = refits[k + 1] if k + 1 < len(refits) else len(dates) - 1
-        for a, (beta, is_ic) in zip(X_by_asset, fits(p)):
-            X, betas[(dates[p], a)] = X_by_asset[a], beta
+    betas, in_sample = {}, {}
+    for p in refit_points(cfg, dates):
+        for a, (beta, ic) in zip(X_by_asset, fits(p)):
+            betas[(dates[p], a)], in_sample[(dates[p], a)] = beta, ic
+    return betas, in_sample
+
+
+def apply_betas(cfg, X_by_asset, y_by_asset, dates, betas, in_sample=None):
+    """S (ex-intercept) and s in [0,1] per asset and day from calibrated betas: each refit's betas apply from the next
+    day to the next refit. Returns (S, s, IC table: in-sample and out-of-sample per refit and asset)."""
+    N = cfg["normalize"]
+    S, ics = pd.DataFrame(np.nan, dates, list(X_by_asset)), []
+    s = S.copy()
+    refits = sorted({d for d, _ in betas})
+    for k, day in enumerate(refits):
+        p = dates.get_loc(day)
+        stop = dates.get_loc(refits[k + 1]) if k + 1 < len(refits) else len(dates) - 1
+        for a in X_by_asset:
+            X, beta = X_by_asset[a], betas[(day, a)].reindex(X_by_asset[a].columns).fillna(0.0)
             cur = X.fillna(0.0).values @ beta.values  # S_t with the current betas
             oos = pd.Series(cur[p + 1:stop + 1]).corr(y_by_asset[a].iloc[p + 1:stop + 1].reset_index(drop=True))
-            ics.append({"refit": dates[p], "asset": a, "in_sample": is_ic, "out_of_sample": oos if beta.any() else np.nan})
+            ics.append({"refit": day, "asset": a, "in_sample": (in_sample or {}).get((day, a), np.nan),
+                        "out_of_sample": oos if beta.any() else np.nan})
             for t in range(p + 1, stop + 1):
                 hist = cur[max(0, t - N["lookback"]):t]
                 S.iat[t, S.columns.get_loc(a)] = cur[t]
@@ -67,4 +88,11 @@ def walk_forward_scores(cfg, X_by_asset, y_by_asset, dates):
     blend = N["alpha_ts"] * s.loc[live] + (1 - N["alpha_ts"]) * xs
     smooth = blend.apply(lambda c: signal.exponential_moving_average(c.values, 1 - 0.5 ** (1 / N["ewma_halflife"])))
     assert ((smooth >= 0) & (smooth <= 1)).all().all()
-    return S.loc[live], smooth, betas, pd.DataFrame(ics)
+    return S.loc[live], smooth, pd.DataFrame(ics)
+
+
+def walk_forward_scores(cfg, X_by_asset, y_by_asset, dates):
+    """Calibration and scoring in one: S, s, betas and the IC table (fit_betas, then apply_betas)."""
+    betas, in_sample = fit_betas(cfg, X_by_asset, y_by_asset, dates)
+    S, s, ics = apply_betas(cfg, X_by_asset, y_by_asset, dates, betas, in_sample)
+    return S, s, betas, ics

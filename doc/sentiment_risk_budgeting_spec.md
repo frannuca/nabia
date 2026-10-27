@@ -28,13 +28,13 @@ LLM news pipeline ──► node-level daily features ┘
 
 ---
 
-## 1. Indicator tree (taxonomy)
+## 1. Sentiment factor tree (taxonomy)
 
-Every asset inherits all indicators from its ancestors as **candidate features**. The elastic net selects and weights them per asset.
+The taxonomy is a tree of sentiment factors only; the portfolio's assets are not part of it. Each asset is configured in the run's JSON file with the factor nodes it may load on (each with a sign): the indicators and LLM features of those nodes are its **candidate features**, and the elastic net selects and weights them per asset.
 
-Node ID convention: `L0.GLOBAL`, `L1.EQ`, `L1.CMD`, `L1.FI`, `L2.EQ.<REGION>.<SECTOR>`, `L2.CMD.<COMPLEX>`, `L2.FI.<SEGMENT>`, `L3.<ASSET_ID>`.
+Node ID convention: the path below the root. `GLOBAL`; the regions `US`, `EU`, `APAC` and the commodity complex `CMD`; per region the branches `<REGION>.MACRO`, `.CB` (central banks), `.EQ`, `.RATES`, `.CREDIT`, `.FX`; then detail nodes such as `US.EQ.TECH`, `APAC.FX.JPY`, `CMD.ENERGY.CRUDE`.
 
-### L0 — Global risk appetite (all assets)
+### Global factor (`GLOBAL`)
 - VIX, MOVE, FX implied vol (CVIX)
 - Credit spreads: US HY/IG OAS, iTraxx Main / Crossover, CDX IG/HY
 - Financial conditions: Chicago Fed NFCI, GS FCI (if available)
@@ -43,9 +43,9 @@ Node ID convention: `L0.GLOBAL`, `L1.EQ`, `L1.CMD`, `L1.FI`, `L2.EQ.<REGION>.<SE
 - USD index, gold/copper ratio (risk-on/off proxies)
 - **LLM**: risk_appetite, growth_tone, inflation_tone, geopolitical_stress, credit_tone, central-bank hawk/dove (`cb_tone`) — from Prompt C
 
-### L1 — Asset class
+### Regions and the commodity complex
 
-| Equity (`L1.EQ`) | Commodity (`L1.CMD`) | Fixed income (`L1.FI`) |
+| Equity (`<REGION>.EQ`) | Commodity (`CMD`) | Rates and credit (`<REGION>.RATES`, `<REGION>.CREDIT`) |
 |---|---|---|
 | VIX term structure (VIX9D/VIX/VIX3M) | CFTC COT managed-money net (z-score) | MOVE, swaption vol |
 | SKEW index, 25Δ risk reversals | Curve shape / roll yield (backwardation vs contango) | Term premium (ACM) |
@@ -54,12 +54,12 @@ Node ID convention: `L0.GLOBAL`, `L1.EQ`, `L1.CMD`, `L1.FI`, `L2.EQ.<REGION>.<SE
 | Equity fund flows (EPFR) | China PMI, inventory surprises (EIA, LME) | IG/HY fund flows, new-issue concessions |
 | **LLM**: equity market tone | **LLM**: commodity_supply_tone | **LLM**: rates tone, credit tone |
 
-### L2 — Bucket
-- Equity: region × sector (GICS or ICB). Sector ETF flows, sector news tone (LLM).
+### Sectors
+- Equity: sectors per region (GICS or ICB). Sector ETF flows, sector news tone (LLM).
 - Commodity: energy / base metals / precious metals / agriculture. Crack spreads, specific inventories, complex news tone (LLM).
-- Fixed income: govt curve segment (2y / 10y / 30y), IG & HY by sector, EM sovereign. Curve slopes, breakevens, swap spreads, segment news tone (LLM).
+- Rates and credit: govt curve segment (short / long dated), IG & HY, EM sovereign. Curve slopes, breakevens, swap spreads, segment news tone (LLM).
 
-### L3 — Single underlying
+### Single markets and names (detail nodes)
 - Single stocks: LLM name-level news tone + event flags, analyst revision breadth, earnings-call tone, short interest, insider buying, single-name option skew.
 - Issuer bonds: issuer CDS, CDS–bond basis, equity-implied credit signal, rating-outlook changes, LLM issuer tone.
 - Commodities: contract-specific news tone (LLM), positioning.
@@ -91,7 +91,7 @@ For each node produce 5 daily features:
 - `positive=True` (features are pre-oriented → prevents nonsensical sign flips). Configurable.
 - Refit on rolling or expanding window, monthly or quarterly (config).
 - Optional stability selection: bootstrap B fits (block bootstrap), keep features selected in > 60% of runs.
-- If data at L3 is too sparse: pooled regression per L2 bucket with shared betas (config flag).
+- If an asset's data is too sparse: pooled regression over the assets of a region or branch with shared betas (config flag).
 
 ### 2.4 Aggregation
 `S_i,t = Σ_k β_ik · z_k,t` (prediction minus intercept). All-zero betas ⇒ S = 0 ⇒ neutral.
@@ -155,7 +155,7 @@ def risk_budget_weights(Sigma, b):
 2. **Deduplicate**: embeddings, cosine > 0.9 within 48h = same story cluster. `novelty = 1` for first article in cluster, decaying (e.g. `1/(1+n_prior)`) for later ones.
 3. **Triage** (Prompt A, small/cheap model): relevance + mapping to taxonomy nodes.
 4. **Score** (Prompt B, stronger model): sentiment per (article, node) — only for relevant articles.
-5. **Daily macro digest** (Prompt C): L0 / central-bank / commodity-supply tone from the day's deduplicated headlines.
+5. **Daily macro digest** (Prompt C): global / central-bank / commodity-supply tone from the day's deduplicated headlines.
 6. **Aggregate** per node and day:
    `s_node,t = Σ_a w_a s_a e^{−λ(t − t_a)} / Σ_a w_a e^{−λ(t − t_a)}`,
    `w_a = relevance × confidence × novelty × source_weight`. λ from half-life config (default 3 days).
@@ -255,7 +255,7 @@ Rules:
 - Do not treat reported price moves as sentiment; they are reactions, not information.
 - Rumours, unnamed sources, opinion pieces: keep the direction but lower confidence.
 - "spillover" nodes usually deserve smaller magnitudes than "direct" nodes.
-- Respond with JSON only, matching the schema. rationale ≤ 25 words.
+- Respond with JSON only, matching the schema.
 ```
 
 **User**
@@ -275,18 +275,13 @@ Schema:
     {
       "node_id": str,
       "sentiment": float -1..1,
-      "confidence": float 0-1,
-      "magnitude": "low" | "medium" | "high",
-      "horizon": "intraday" | "days" | "weeks" | "structural",
-      "surprise_vs_expectations": "below" | "inline" | "above" | "not_stated",
-      "fact_type": "confirmed" | "official_statement" | "rumour" | "opinion",
-      "rationale": str
+      "confidence": float 0-1
     }
   ]
 }
 ```
 
-### Prompt C — Daily macro & central-bank digest (L0 / L1)
+### Prompt C — Daily macro & central-bank digest (global and regions)
 
 **System**
 ```
@@ -341,9 +336,9 @@ sentiment_rb/
     assets.yaml            # asset_id, node path, base budget b0, return series ref
     features.yaml          # feature_id, source, node_id, publication_lag, transform, sign per asset_class
   prompts/
-    triage_v1.md
-    scoring_v1.md
-    digest_v1.md
+    triage.md
+    scoring.md
+    digest.md
   src/sentiment_rb/
     data/        loaders.py, pit.py            # point-in-time store (as_of, available_at)
     features/    transforms.py, tree.py        # z-score, orient, inherit features down the tree
@@ -367,7 +362,7 @@ sentiment_rb/
 7. CLI: `ingest`, `score-news`, `build-features`, `fit`, `signal`, `optimize`, `backtest`.
 
 ### 5.3 Tests (pytest)
-- Feature inheritance: an L3 asset receives L0+L1+L2+L3 features exactly once.
+- Feature mapping: an asset receives the features of its configured factor nodes exactly once.
 - PIT: no feature value used before `available_at` (property test with random lags).
 - Purged CV: no train index within `h` of any test index.
 - Normalization outputs ∈ [0,1]; no full-sample statistics used.

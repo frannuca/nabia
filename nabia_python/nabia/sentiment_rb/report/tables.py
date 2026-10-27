@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import pandas as pd
 
+from ..features.tree import own_node
+
 
 def tables(cfg, X, y, S, s, betas, bench, overlay, sched, b0):
     """The report tables: comparison, IC (S and s, per asset and pooled), LLM-feature IC, snapshot, selection."""
@@ -13,9 +15,9 @@ def tables(cfg, X, y, S, s, betas, bench, overlay, sched, b0):
     yy = pd.DataFrame(y).loc[S.index]
     ic = pd.DataFrame({"IC(S, y)": [S[a].corr(yy[a]) for a in assets], "IC(s, y)": [s[a].corr(yy[a]) for a in assets]}, assets)
     ic.loc["pooled"] = [S.stack().corr(yy.stack()), s.stack().corr(yy.stack())]
-    llm_ic = pd.Series({k: pd.concat([X[a].get(f"llm_{k}@{cfg['assets'][a][0]}", pd.Series(dtype=float)).reindex(S.index)
+    llm_ic = pd.Series({k: pd.concat([X[a].get(f"llm_{k}@{own_node(cfg, a)}", pd.Series(dtype=float)).reindex(S.index)
                                       for a in assets]).corr(pd.concat([yy[a] for a in assets]))
-                        for k in cfg["llm_feature_signs"]}, name="pooled IC (own L3 node)")
+                        for k in cfg["llm_feature_signs"]}, name="pooled IC (own factor node)")
     last = sched.index[-1]
     beta_last = {a: betas[max(k for k in betas if k[1] == a and k[0] <= last)] for a in assets}
     top = {a: ", ".join(f"{k} {v:+.2f}" for k, v in (X[a].loc[last].fillna(0) * beta_last[a]).nlargest(3).items() if v)
@@ -37,6 +39,7 @@ def show_tables(t, last):
 def save(out, t, sched, s, news, bench, overlay, ics):
     for name, table in {**t, "budgets": sched, "signal": s}.items():
         table.to_csv(out / f"{name}.csv")
-    news.drop(columns=[c for c in news if c.startswith("_")]).to_csv(out / "news.csv", index=False)
+    if news is not None:  # None when the scores come from a scores file
+        news.drop(columns=[c for c in news if c.startswith("_")]).to_csv(out / "news.csv", index=False)
     pd.DataFrame({"ERC (b0)": bench.performance.equity, "sentiment overlay": overlay.performance.equity}).to_csv(out / "equity.csv")
     ics.to_csv(out / "ic_in_out_of_sample.csv", index=False)
