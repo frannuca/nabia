@@ -31,9 +31,9 @@
     "modulate_long_short": true
   },
   "portfolio": {
-    "covariance_window": 80,
-    "rebalance_frequency": 5,
-    "transaction_cost": 0.0005
+    "covariance_window": 60,
+    "rebalance_frequency": 1,
+    "transaction_cost": 0.000
   },
   "backtest": {
     "lookback_days": 252,
@@ -44,7 +44,7 @@
     "SPX": {
       "name": "S&P 500",
       "class": "EQ",
-      "budget": 0.2,
+      "budget": 1,
       "vol": 0.16,
       "ticker": "^GSPC",
       "factors": {
@@ -56,7 +56,7 @@
     "SX5E": {
       "name": "Euro Stoxx 50",
       "class": "EQ",
-      "budget": 0.15,
+      "budget": 1,
       "vol": 0.18,
       "ticker": "^STOXX50E",
       "factors": {
@@ -69,7 +69,7 @@
     "WTI": {
       "name": "Crude oil",
       "class": "CMD",
-      "budget": 0.1,
+      "budget": 1,
       "vol": 0.35,
       "ticker": "BZ=F",
       "factors": {
@@ -84,7 +84,7 @@
     "GOLD": {
       "name": "Gold",
       "class": "CMD",
-      "budget": 0.15,
+      "budget": 1,
       "vol": 0.15,
       "ticker": "GC=F",
       "factors": {
@@ -98,7 +98,7 @@
     "UST10": {
       "name": "US 10y Treasury note",
       "class": "GOVT",
-      "budget": 0.25,
+      "budget": 1,
       "vol": 0.07,
       "ticker": "ZN=F",
       "factors": {
@@ -111,7 +111,7 @@
     "HY": {
       "name": "US high yield bonds",
       "class": "CREDIT",
-      "budget": 0.15,
+      "budget": 1,
       "vol": 0.06,
       "ticker": "HYG",
       "factors": {
