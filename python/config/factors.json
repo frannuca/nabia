@@ -1,0 +1,32 @@
+{
+  "description": "The economic factors news are scored on. sentiment > 0 means the factor itself goes up, as stated in 'positive' (more growth, more inflation, tighter policy, more stress). group and region tag related factors: exposures of an asset are shrunk toward its group, and a factor without a proxy borrows its group's exposures until it has enough news. proxy is the factor's weekly market return, a sum of terms [series, transform, weight]: series 'fred:<id>' (downloaded from FRED) or 'price:<symbol>' (prices table); transform 'logret' (log return) or 'diff' (change, for yields, spreads and indices). The proxies are orthogonalized in the order of this list, so each one is its factor's shock net of the factors before it (e.g. the 2-year yield net of equities = a monetary-policy shock, Brent net of growth = energy supply, breakevens net of growth and energy = inflation).",
+  "factors": {
+    "GROWTH_US":         {"name": "US growth",                    "group": "growth",    "region": "US",     "positive": "stronger US activity, jobs, consumer, housing", "proxy": [["price:^RUT", "logret", 1]]},
+    "GROWTH_EUROPE":     {"name": "European growth",              "group": "growth",    "region": "EU",     "positive": "stronger euro-area and UK activity", "proxy": [["price:^STOXX50E", "logret", 1]]},
+    "GROWTH_CHINA":      {"name": "Chinese growth",               "group": "growth",    "region": "CN",     "positive": "stronger Chinese activity, stimulus, property stabilizing", "proxy": [["price:^HSI", "logret", 1]]},
+    "GROWTH_EM":         {"name": "Emerging-market growth",       "group": "growth",    "region": "EM",     "positive": "stronger emerging economies (ex China), capital inflows"},
+    "TECH_AI":           {"name": "Technology and AI cycle",      "group": "corporate", "region": "GLOBAL", "positive": "stronger AI capex, semiconductor and cloud demand", "proxy": [["price:^NDX", "logret", 1], ["price:^GSPC", "logret", -1]]},
+    "EARNINGS":          {"name": "Corporate earnings",           "group": "corporate", "region": "GLOBAL", "positive": "earnings or guidance above expectations, margins up"},
+    "POLICY_FED":        {"name": "Federal Reserve policy",       "group": "policy",    "region": "US",     "positive": "hawkish Fed: hikes, fewer cuts, balance-sheet tightening", "proxy": [["fred:DGS2", "diff", 1]]},
+    "POLICY_ECB":        {"name": "ECB policy",                   "group": "policy",    "region": "EU",     "positive": "hawkish ECB: hikes, fewer cuts"},
+    "POLICY_BOJ":        {"name": "Bank of Japan policy",         "group": "policy",    "region": "JP",     "positive": "BoJ tightening: hikes, less bond buying"},
+    "POLICY_PBOC":       {"name": "People's Bank of China policy","group": "policy",    "region": "CN",     "positive": "PBoC tightening: less easing, higher rates or reserve ratios"},
+    "POLICY_OTHER_DM":   {"name": "Other developed central banks","group": "policy",    "region": "GLOBAL", "positive": "hawkish BoE, SNB, BoC, RBA and others"},
+    "FISCAL_US":         {"name": "US fiscal policy",             "group": "fiscal",    "region": "US",     "positive": "wider deficits, more Treasury issuance, debt-ceiling stress", "proxy": [["fred:THREEFYTP10", "diff", 1]]},
+    "SOVEREIGN_EUROPE":  {"name": "European sovereign risk",      "group": "fiscal",    "region": "EU",     "positive": "budget or debt stress in euro-area countries, wider spreads"},
+    "ENERGY_SUPPLY":     {"name": "Energy supply tightness",      "group": "commodity", "region": "GLOBAL", "positive": "tighter oil and gas supply: OPEC+ cuts, outages, sanctions, inventory draws", "proxy": [["price:BZ=F", "logret", 1]]},
+    "INDUSTRIAL_METALS": {"name": "Industrial metals tightness",  "group": "commodity", "region": "GLOBAL", "positive": "tighter copper, aluminium, iron-ore balance", "proxy": [["price:HG=F", "logret", 1]]},
+    "AGRICULTURE":       {"name": "Agricultural supply tightness","group": "commodity", "region": "GLOBAL", "positive": "tighter grain and soft-commodity supply: weather, export bans", "proxy": [["price:ZC=F", "logret", 0.3333], ["price:ZS=F", "logret", 0.3333], ["price:ZW=F", "logret", 0.3333]]},
+    "INFLATION_US":      {"name": "US inflation",                 "group": "inflation", "region": "US",     "positive": "higher or upside-surprising US prices and wages", "proxy": [["fred:T10YIE", "diff", 1]]},
+    "INFLATION_EUROPE":  {"name": "European inflation",           "group": "inflation", "region": "EU",     "positive": "higher or upside-surprising euro-area and UK prices"},
+    "CREDIT_STRESS":     {"name": "Credit stress",                "group": "financial", "region": "GLOBAL", "positive": "wider credit spreads, defaults, downgrades", "proxy": [["fred:BAA10Y", "diff", 1]]},
+    "BANKING_STRESS":    {"name": "Banking and funding stress",   "group": "financial", "region": "GLOBAL", "positive": "bank troubles, funding or liquidity squeezes", "proxy": [["fred:STLFSI4", "diff", 1]]},
+    "RISK_APPETITE":     {"name": "Investor risk appetite",       "group": "financial", "region": "GLOBAL", "positive": "investors adding risk: inflows, leverage, speculation", "proxy": [["fred:VIXCLS", "logret", -1]]},
+    "USD":               {"name": "US dollar",                    "group": "fx",        "region": "US",     "positive": "stronger dollar against the other major currencies", "proxy": [["fred:DTWEXBGS", "logret", 1]]},
+    "JPY":               {"name": "Japanese yen",                 "group": "fx",        "region": "JP",     "positive": "stronger yen: repatriation, carry unwind, intervention", "proxy": [["fred:DEXJPUS", "logret", -1]]},
+    "CNY":               {"name": "Chinese yuan",                 "group": "fx",        "region": "CN",     "positive": "stronger yuan, firmer PBoC fixing", "proxy": [["fred:DEXCHUS", "logret", -1]]},
+    "GOLD_DEMAND":       {"name": "Gold demand",                  "group": "commodity", "region": "GLOBAL", "positive": "central-bank buying, ETF inflows, safe-haven demand for gold", "proxy": [["price:GC=F", "logret", 1]]},
+    "GEOPOLITICS":       {"name": "Geopolitical risk",            "group": "event",     "region": "GLOBAL", "positive": "more armed conflict, sanctions, political crises"},
+    "TRADE_POLICY":      {"name": "Trade policy escalation",      "group": "event",     "region": "GLOBAL", "positive": "more tariffs, export controls, trade escalation"}
+  }
+}

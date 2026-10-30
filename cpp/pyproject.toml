@@ -38,12 +38,12 @@ CMAKE_POSITION_INDEPENDENT_CODE = "ON"
 
 # Wheels for every supported Python and platform (run by .github/workflows/wheels.yml):
 #   pipx run cibuildwheel==4.3.4 --platform linux cpp     (from the repository root; Linux needs Docker)
-# Each wheel is tested with the bridge tests of nabia_python ({project} is the repository root).
+# Each wheel is tested with the bridge tests in cpp/bindings/tests ({project} is the repository root).
 [tool.cibuildwheel]
 build = "cp310-* cp311-* cp312-* cp313-* cp314-*"
 skip = "*-musllinux_* *-win32 *-manylinux_i686"
 test-extras = ["test"]
-test-command = "pytest -q -p no:cacheprovider {project}/nabia_python/tests/bridge"
+test-command = "pytest -q -p no:cacheprovider {project}/cpp/bindings/tests"
 
 [tool.cibuildwheel.linux]
 # GCC 12+ for C++20; Eigen and iir1 are fetched at configure time.

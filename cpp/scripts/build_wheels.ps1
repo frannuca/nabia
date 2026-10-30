@@ -1,13 +1,12 @@
 <#
 .SYNOPSIS
     Builds nabia_python_bridge wheels for Windows (win_amd64 by default) with cibuildwheel, and tests
-    each one with the bridge tests of nabia_python (nabia_python/tests/bridge).
+    each one with the bridge tests in cpp\bindings\tests.
 
 .DESCRIPTION
     The Windows counterpart of build_wheels.sh. cibuildwheel downloads every CPython it needs, builds
     the wheel from this C++ project (cpp/pyproject.toml, scikit-build-core, MSVC), installs it in a
-    clean environment and runs the tests. The wheels end up in dist\ at the repository root, where
-    nabia_python\scripts\setup_env.ps1 installs them from.
+    clean environment and runs the tests. The wheels end up in dist\ at the repository root.
 
     Needs, once:
       - Visual Studio 2022 Build Tools with the "Desktop development with C++" workload (C++20);
@@ -96,7 +95,7 @@ if ($NoTest) { $env:CIBW_TEST_SKIP = "*" } else { Remove-Item Env:CIBW_TEST_SKIP
 
 Write-Host "Building $($env:CIBW_BUILD) for $Arch into $OutDir"
 # cibuildwheel runs from the repository root: {project} in the test command is the root, so the
-# tests of python\tests\bridge are found; "cpp" is the package folder with pyproject.toml.
+# tests of cpp\bindings\tests are found; "cpp" is the package folder with pyproject.toml.
 Push-Location $root
 try {
     & (Join-Path $tools "Scripts\cibuildwheel.exe") --platform windows --output-dir $OutDir cpp

@@ -1,0 +1,18 @@
+# News collection, LLM scoring on economic factors, and asset exposures. collector, scoring and datalayer use only
+# the standard library; exposures and budgets need numpy and pandas, budgets also the C++ wheel (../dist):
+#   python3 -m venv .venv && .venv/bin/pip install --find-links ../dist -e .
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nabia-news"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24", "pandas>=2.0", "nabia_python_bridge>=0.1.0"]  # the bridge: wheel from ../dist
+
+[tool.setuptools]
+packages = ["budgets", "collector", "datalayer", "exposures", "scoring"]
+
+[tool.setuptools.package-data]
+scoring = ["prompt.md"]

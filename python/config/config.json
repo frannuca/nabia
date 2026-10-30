@@ -1,0 +1,67 @@
+{
+  "db": "../../data/market.db",
+  "factors": "factors.json",
+  "collect": {
+    "rss": true,
+    "gkg": true,
+    "since": "2020-01-01",
+    "until": null,
+    "gkg_per_day": 10,
+    "gkg_slices": ["143000", "203000"],
+    "weekends": false,
+    "workers": 4,
+    "feeds": {
+      "MarketWatch": "https://feeds.content.dowjones.io/public/rss/mw_topstories",
+      "CNBC": "https://www.cnbc.com/id/100003114/device/rss/rss.html",
+      "CNBC Economy": "https://www.cnbc.com/id/20910258/device/rss/rss.html",
+      "Financial Times": "https://www.ft.com/markets?format=rss",
+      "Investing.com": "https://www.investing.com/rss/news.rss",
+      "OilPrice": "https://oilprice.com/rss/main",
+      "Federal Reserve": "https://www.federalreserve.gov/feeds/press_all.xml",
+      "ECB": "https://www.ecb.europa.eu/rss/press.html",
+      "Bank of England": "https://www.bankofengland.co.uk/rss/news"
+    }
+  },
+  "llm": {
+    "provider": "ollama",
+    "workers": 1,
+    "requests_per_minute": null,
+    "max_retries": 2,
+    "timeout": 600,
+    "temperature": 0,
+    "ollama": {"model": "gemma4:26b", "host": "http://localhost:11434", "think": false, "options": {"num_ctx": 8192}},
+    "openai": {"model": "gpt-5-mini", "base_url": "https://api.openai.com/v1", "api_key_env": "OPENAI_API_KEY"},
+    "anthropic": {"model": "claude-haiku-5-5", "base_url": "https://api.anthropic.com/v1", "api_key_env": "ANTHROPIC_API_KEY", "max_tokens": 1024}
+  },
+  "score": {"since": null, "until": null, "limit": null, "model": null, "prompt": null},
+  "exposures": {
+    "assets": ["^GSPC", "^NDX", "^STOXX50E", "^N225", "^HSI", "ZT=F", "ZN=F", "ZB=F", "BZ=F", "NG=F", "GC=F", "HG=F", "ZW=F"],
+    "start": "2010-01-01",
+    "window_weeks": 156,
+    "t_min": 2.0,
+    "stability_windows": 8,
+    "stability": 0.75,
+    "group_shrink": 0.25,
+    "group_fallback": 0.5,
+    "news_min_weeks": 52,
+    "news_override": true
+  },
+  "budgets": {
+    "start": "2020-01-03",
+    "end": null,
+    "frequency": "W-FRI",
+    "base": null,
+    "half_life_days": 5,
+    "evidence": 3.0,
+    "strength": 0.5,
+    "min_multiplier": 0.5,
+    "max_multiplier": 1.5
+  },
+  "weights": {
+    "risk_measure": "Volatility",
+    "confidence_level": 0.975,
+    "cov_window_weeks": 104,
+    "shrinkage": 0.1,
+    "tolerance": 1e-10
+  }
+}

@@ -8,15 +8,15 @@
 #   NABIA_WHEEL_BUILD_TYPE=RelWithDebInfo cpp/scripts/build_wheels.sh 3.14   # with debug symbols
 #
 # Wheels go to dist/ at the repository root (NABIA_WHEEL_DIR overrides it), where the Python
-# project installs them from (nabia_python/scripts/setup_env.sh). The tests are the bridge tests of
-# nabia_python (nabia_python/tests/bridge). On macOS the wheels target
+# Python environments install them from (pip install --find-links dist nabia_python_bridge). The tests
+# are the bridge tests in cpp/bindings/tests. On macOS the wheels target
 # MACOSX_DEPLOYMENT_TARGET, 13.0 unless already set. Wheels for Linux and Windows are built by
 # cibuildwheel (configured in pyproject.toml, run by .github/workflows/wheels.yml).
 set -euo pipefail
 
 cpp="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 root="$(dirname "$cpp")"
-tests="$root/nabia_python/tests/bridge"
+tests="$cpp/bindings/tests"
 build_type="${NABIA_WHEEL_BUILD_TYPE:-Release}"
 out="${NABIA_WHEEL_DIR:-$root/dist}"
 versions=("$@")

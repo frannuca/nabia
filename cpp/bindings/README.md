@@ -22,7 +22,7 @@ Where the C++ engines take time-indexed data, `frames` maps the pandas index to 
 The bindings are part of the C++ project (`cpp/`). Their sources are in `cpp/bindings`: the pybind11
 C++ in `src/` and the package's Python files (re-exports, the pandas interface `frames`) in
 `nabia_python_bridge/`. The package has two extension modules: `_core` (the whole library) and
-`_rb_backtest` (the JSON-configured backtest that the `nabia` package of `nabia_python/` wraps).
+`_rb_backtest` (the JSON-configured backtest).
 
 ```sh
 # Wheels for CPython 3.10-3.14 on this machine, each tested installed (needs uv) -> dist/
@@ -30,7 +30,7 @@ cpp/scripts/build_wheels.sh                              # or: build_wheels.sh 3
 NABIA_WHEEL_BUILD_TYPE=RelWithDebInfo cpp/scripts/build_wheels.sh 3.14   # with debug symbols
 
 # Current interpreter only
-nabia_python/.venv/bin/python -m pip wheel ./cpp --no-deps -w dist
+python3 -m pip wheel ./cpp --no-deps -w dist
 
 # Windows (PowerShell; Visual Studio 2022 Build Tools, Git, Python): CPython 3.10-3.14, each tested
 cpp\scripts\build_wheels.ps1                              # or: -Versions 3.12,3.13
@@ -44,12 +44,12 @@ gh run download <run-id> -n all-wheels -D dist
 
 # Development build for debugging in CLion: modules written next to the .py files
 cd cpp && cmake --preset python-bridge && cmake --build --preset python-bridge
-PYTHONPATH=cpp/bindings nabia_python/.venv/bin/python my_script.py
+PYTHONPATH=cpp/bindings cpp/.venv/bin/python my_script.py
 ```
 
-The Python projects install the wheel from `dist/` with their `scripts/setup_env.sh` (`setup_env.ps1` on Windows)
-(`pip install --no-index --find-links dist nabia_python_bridge` by hand).
-The tests of the bindings are in the Python project, `nabia_python/tests/bridge`; the wheel scripts run them
+Install the wheel from `dist/` with `pip install --no-index --find-links dist nabia_python_bridge`
+(`cpp/scripts/fetch_wheels.sh` downloads the wheels built by GitHub Actions into `dist/`).
+The tests of the bindings are in `cpp/bindings/tests`; the wheel scripts run them
 on every wheel. Every command is explained in the chapter "Wheels, cibuildwheel and GitHub Actions" of
 [`doc/nabia.pdf`](../../doc/nabia.pdf).
 

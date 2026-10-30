@@ -1,11 +1,11 @@
 # Builds and tests nabia_python_bridge wheels for CPython 3.10-3.14 on Linux, macOS and Windows
-# with cibuildwheel (settings in cpp/pyproject.toml), testing each with nabia_python/tests/bridge. Runs on
+# with cibuildwheel (settings in cpp/pyproject.toml), testing each with cpp/bindings/tests. Runs on
 # demand, on version tags (v*), and on pull requests that touch the C++ project or the bridge tests.
 #
 #   wheels          one job per platform; artifact wheels-<os>-<arch>
 #   collect         every wheel plus the sdist in one artifact, all-wheels
 #   release         on a v* tag: a GitHub Release with all of them attached
-#   windows-script  runs cpp/scripts/build_wheels.ps1 and nabia_python/scripts/setup_env.ps1 on Windows
+#   windows-script  runs cpp/scripts/build_wheels.ps1 on Windows
 name: wheels
 
 on:
@@ -13,7 +13,7 @@ on:
   push:
     tags: ["v*"]
   pull_request:
-    paths: ["cpp/**", "nabia_python/tests/bridge/**", "nabia_python/scripts/**", ".github/workflows/wheels.yml"]
+    paths: ["cpp/**", ".github/workflows/wheels.yml"]
 
 jobs:
   wheels:
@@ -92,9 +92,3 @@ jobs:
       - name: cpp/scripts/build_wheels.ps1 (CPython 3.12, tested)
         shell: pwsh
         run: cpp/scripts/build_wheels.ps1 -Versions 3.12 -PythonExe python
-      - name: nabia_python/scripts/setup_env.ps1 and the Python project's tests
-        shell: pwsh
-        run: |
-          nabia_python/scripts/setup_env.ps1 -PythonExe python
-          nabia_python/.venv/Scripts/python.exe -m pytest -q nabia_python/tests
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

@@ -108,8 +108,7 @@ scripts/build_wheels.sh                 # CPython 3.10-3.14, each wheel tested (
 scripts/build_wheels.sh 3.14            # one version
 ```
 
-The Python project (`../nabia_python`) installs it from there; the bindings' tests are in
-`../nabia_python/tests/bridge`. See [`bindings/README.md`](bindings/README.md).
+Python environments install it from there; the bindings' tests are in `bindings/tests`. See [`bindings/README.md`](bindings/README.md).
 
 ## Applications
 
@@ -126,7 +125,7 @@ cmake --preset debug && cmake --build --preset debug && ctest --preset debug
 ```
 
 Presets: `debug`, `release`, `releaseWithDebugInfo`, `asan`, and `python-bridge` (a development build of
-the bindings, with `../nabia_python/.venv` as the interpreter). Dependencies: Eigen and iir1 (fetched
+the bindings, with `cpp/.venv` as the interpreter: numpy, pandas, pytest). Dependencies: Eigen and iir1 (fetched
 automatically if not installed), nlohmann/json for the applications, Catch2 for the tests, pybind11 for
 the bindings. Turn the applications off with `-DNABIA_BUILD_APPS=OFF`.
 
